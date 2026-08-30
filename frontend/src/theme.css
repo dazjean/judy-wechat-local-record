@@ -1,0 +1,95 @@
+:root {
+  --bg: #0e1116;
+  --bg2: #151a21;
+  --panel: #1a2028;
+  --panel2: #202732;
+  --ink: #f2efe8;
+  --muted: #9aa3af;
+  --line: #2a323e;
+  --accent: #ff6a3d;
+  --accent-dim: rgba(255, 106, 61, 0.16);
+  --cyan: #38c6ff;
+  --cyan-dim: rgba(56, 198, 255, 0.16);
+  --warn: #ffc94a;
+  --good: #3ddc97;
+  --bad: #ff5d6c;
+}
+
+html.dark {
+  --el-color-primary: #ff6a3d;
+  --el-color-primary-light-3: #ff8a66;
+  --el-color-primary-light-5: #ffb39a;
+  --el-color-primary-light-7: rgba(255, 106, 61, 0.28);
+  --el-color-primary-light-8: rgba(255, 106, 61, 0.16);
+  --el-color-primary-light-9: rgba(255, 106, 61, 0.1);
+  --el-color-primary-dark-2: #e85a30;
+  --el-bg-color: #1a2028;
+  --el-bg-color-page: #0e1116;
+  --el-bg-color-overlay: #202732;
+  --el-fill-color: #202732;
+  --el-fill-color-light: #1a2028;
+  --el-fill-color-blank: #1a2028;
+  --el-text-color-primary: #f2efe8;
+  --el-text-color-regular: #cfd6df;
+  --el-text-color-secondary: #9aa3af;
+  --el-text-color-placeholder: #6b7280;
+  --el-border-color: #2a323e;
+  --el-border-color-light: #2a323e;
+  --el-border-color-lighter: #2a323e;
+  --el-border-color-extra-light: #2a323e;
+  --el-mask-color: rgba(14, 17, 22, 0.72);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+.el-card {
+  --el-card-bg-color: var(--panel);
+  --el-card-border-color: var(--line);
+  border-radius: 14px;
+}
+
+.el-table {
+  --el-table-bg-color: var(--panel);
+  --el-table-tr-bg-color: var(--panel);
+  --el-table-header-bg-color: var(--bg2);
+  --el-table-row-hover-bg-color: var(--panel2);
+  --el-table-border-color: var(--line);
+  --el-table-text-color: var(--ink);
+  --el-table-header-text-color: var(--muted);
+}
+
+.el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: #cfd6df;
+  --el-menu-hover-bg-color: var(--accent-dim);
+  --el-menu-active-color: #fff;
+}
+
+.el-button--primary {
+  --el-button-bg-color: var(--accent);
+  --el-button-border-color: var(--accent);
+  --el-button-hover-bg-color: #ff8a66;
+  --el-button-hover-border-color: #ff8a66;
+}
+
+.el-alert--info {
+  --el-alert-bg-color: var(--panel2);
+}
+
+a {
+  color: var(--cyan);
+}
