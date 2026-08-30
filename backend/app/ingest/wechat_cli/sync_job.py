@@ -424,6 +424,32 @@ def _insert_messages(
     return written, skipped
 
 
+def sync_finish_outcome(
+    *,
+    ok: int,
+    hard_error: str,
+    scanned: bool,
+    written: int,
+    skipped: int,
+) -> tuple[str, str, str]:
+    """同步收尾：状态、对外错误、结束日志。扫描正常但没有新数据不算失败。"""
+    if ok > 0:
+        return (
+            "succeeded",
+            "",
+            f"同步结束：成功，会话 {ok}，写入 {written}，跳过 {skipped}",
+        )
+    if hard_error:
+        return "failed", hard_error, f"同步结束：失败 — {hard_error}"
+    if scanned:
+        return "succeeded", "", "同步结束：成功，本次没有新消息"
+    return (
+        "failed",
+        "暂无可用会话，请确认微信已登录",
+        "同步结束：没有可用会话",
+    )
+
+
 def _history_with_fallback(display: str, username: str, start_date: str, limit: int) -> list[str]:
     names = []
     for n in (username, display, strip_emoji(display)):
@@ -549,10 +575,12 @@ def run_sync_job(
         written_total = 0
         skipped_total = 0
         ok = 0
-        last_public = ""
+        hard_error = ""
+        scanned = False
         synced_person = False
         synced_group = False
         for key, display in usable:
+            scanned = True
             existing = (
                 db.query(Contact)
                 .filter_by(account_id=account.id, peer_key=key)
@@ -570,10 +598,15 @@ def run_sync_job(
             try:
                 lines = _history_with_fallback(display, key, start_date, limit)
             except ReaderError as exc:
-                last_public = exc.public_message
                 if exc.code == "no_history":
-                    log(f"跳过：{display or key} — 暂无记录或名称未能匹配")
+                    reason = (
+                        "暂无新消息"
+                        if existing is not None and existing.last_synced_at
+                        else "暂无记录或名称未能匹配"
+                    )
+                    log(f"跳过：{display or key} — {reason}")
                 else:
+                    hard_error = exc.public_message
                     log(f"失败：{display or key} — {exc.public_message}")
                 continue
             parsed = parse_history_lines(lines, key)
@@ -609,30 +642,30 @@ def run_sync_job(
         job.written = written_total
         job.skipped = skipped_total
         job.ok_contacts = ok
-        if ok == 0 and last_public:
-            job.status = "failed"
-            job.error_message = last_public
-            log(f"同步结束：失败 — {last_public}")
-        elif ok == 0:
-            job.status = "failed"
-            job.error_message = "暂无可用会话，请确认微信已登录"
-            log("同步结束：没有可用会话")
-        else:
-            job.status = "succeeded"
-            job.error_message = ""
+        status, err, line = sync_finish_outcome(
+            ok=ok,
+            hard_error=hard_error,
+            scanned=scanned,
+            written=written_total,
+            skipped=skipped_total,
+        )
+        job.status = status
+        job.error_message = err
+        log(line)
+        if status == "succeeded":
             mark_sync_coverage(db, window_start)
             if synced_person:
                 mark_sync_limit_coverage(db, person_limit, group=False)
             if synced_group:
                 mark_sync_limit_coverage(db, group_limit, group=True)
-            log(f"同步结束：成功，会话 {ok}，写入 {written_total}，跳过 {skipped_total}")
-            try:
-                from app.engine.metrics import run_rule_scan
+            if ok > 0:
+                try:
+                    from app.engine.metrics import run_rule_scan
 
-                scan = run_rule_scan(db, account.id)
-                log(f"已更新效率统计，命中 {scan.get('hits', 0)} 条")
-            except Exception:
-                log("效率统计未更新，可在效率页点重新统计")
+                    scan = run_rule_scan(db, account.id)
+                    log(f"已更新效率统计，命中 {scan.get('hits', 0)} 条")
+                except Exception:
+                    log("效率统计未更新，可在效率页点重新统计")
         db.commit()
     except ReaderError as exc:
         db.rollback()
