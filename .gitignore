@@ -37,3 +37,4 @@ license.dat
 .license-bind-*
 scripts/本机wxid.txt
 data-dir.txt
+data/locks/wx_reader.lock
