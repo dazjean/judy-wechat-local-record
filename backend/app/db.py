@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker, DeclarativeBase
 
 from app.config import settings
@@ -63,10 +64,29 @@ def init_db() -> None:
     _add_column_if_missing("analysis_jobs", "kind", "TEXT DEFAULT 'report'")
     _add_column_if_missing("analysis_jobs", "contact_id", "INTEGER")
     _add_column_if_missing("analysis_jobs", "report_type", "TEXT DEFAULT 'portrait'")
+    _add_column_if_missing("sync_jobs", "account_id", "INTEGER")
+    _ensure_message_account_hash_index()
     from app.analyze.prompt_store import seed_default_prompts
+    from app.accounts import current_account_key, migrate_local_accounts
 
     db = SessionLocal()
     try:
         seed_default_prompts(db)
+        migrate_local_accounts(db, current_account_key())
+        db.commit()
     finally:
         db.close()
+
+
+def _ensure_message_account_hash_index() -> None:
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_message_account_hash "
+                    "ON messages(account_id, raw_hash)"
+                )
+            )
+            conn.commit()
+    except OperationalError:
+        pass

@@ -78,3 +78,5 @@ def test_dedup_hash_stable():
     assert a[0].raw_hash == b[0].raw_hash
     assert a[0].raw_hash != c[0].raw_hash
     assert a[0].raw_hash != d[0].raw_hash
+    keyed = parse_history_lines(lines, "peer-a", account_key="wxid_cs")
+    assert keyed[0].raw_hash != a[0].raw_hash

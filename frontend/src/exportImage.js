@@ -42,6 +42,170 @@ function canvasToPngBlob(canvas) {
   });
 }
 
+const MAX_CANVAS = 8192;
+
+function waitFrames(n = 2) {
+  return new Promise((resolve) => {
+    const step = () => {
+      if (n <= 0) {
+        resolve();
+        return;
+      }
+      n -= 1;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+const TABLE_EXPAND_SEL =
+  ".el-table, .el-table__inner-wrapper, .el-table__header-wrapper, .el-table__body-wrapper, .el-table__header, .el-table__body, .el-scrollbar, .el-scrollbar__wrap, .el-scrollbar__view";
+
+function unlockAncestors(el) {
+  const saved = [];
+  const remember = (node) => {
+    saved.push({
+      node,
+      overflow: node.style.overflow,
+      overflowX: node.style.overflowX,
+      overflowY: node.style.overflowY,
+      maxHeight: node.style.maxHeight,
+      maxWidth: node.style.maxWidth,
+      height: node.style.height,
+    });
+  };
+  let node = el.parentElement;
+  while (node && node !== document.documentElement) {
+    const style = window.getComputedStyle(node);
+    if (
+      style.overflow !== "visible" ||
+      style.overflowX !== "visible" ||
+      style.overflowY !== "visible" ||
+      style.maxHeight !== "none"
+    ) {
+      remember(node);
+      node.style.overflow = "visible";
+      node.style.overflowX = "visible";
+      node.style.overflowY = "visible";
+      node.style.maxHeight = "none";
+    }
+    node = node.parentElement;
+  }
+  el.querySelectorAll(TABLE_EXPAND_SEL).forEach((item) => {
+    remember(item);
+    item.style.overflow = "visible";
+    item.style.overflowX = "visible";
+    item.style.overflowY = "visible";
+    item.style.maxHeight = "none";
+    item.style.maxWidth = "none";
+    item.style.height = "auto";
+  });
+  const main = el.closest(".el-main");
+  const scrollTop = main ? main.scrollTop : 0;
+  const scrollLeft = main ? main.scrollLeft : 0;
+  if (main) {
+    main.scrollTop = 0;
+    main.scrollLeft = 0;
+  }
+  return () => {
+    if (main) {
+      main.scrollTop = scrollTop;
+      main.scrollLeft = scrollLeft;
+    }
+    for (const item of saved) {
+      item.node.style.overflow = item.overflow;
+      item.node.style.overflowX = item.overflowX;
+      item.node.style.overflowY = item.overflowY;
+      item.node.style.maxHeight = item.maxHeight;
+      item.node.style.maxWidth = item.maxWidth;
+      item.node.style.height = item.height;
+    }
+  };
+}
+
+function expandClone(clone) {
+  clone.style.margin = "0";
+  clone.style.maxWidth = "none";
+  clone.style.maxHeight = "none";
+  clone.style.overflow = "visible";
+  clone.style.overflowX = "visible";
+  clone.style.overflowY = "visible";
+  clone.style.boxSizing = "border-box";
+  clone.querySelectorAll(TABLE_EXPAND_SEL).forEach((node) => {
+    node.style.height = "auto";
+    node.style.maxHeight = "none";
+    node.style.maxWidth = "none";
+    node.style.overflow = "visible";
+    node.style.overflowX = "visible";
+    node.style.overflowY = "visible";
+  });
+}
+
+function measureCaptureBox(el) {
+  const cs = window.getComputedStyle(el);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  let width = Math.max(el.scrollWidth, el.offsetWidth, 1);
+  let height = Math.max(el.scrollHeight, el.offsetHeight, 1);
+  el.querySelectorAll("*").forEach((node) => {
+    if (!(node instanceof HTMLElement)) return;
+    width = Math.max(width, node.scrollWidth, node.offsetWidth);
+    height = Math.max(height, node.scrollHeight);
+  });
+  // html-to-image 会把 width 写进克隆节点；border-box 下内边距会再吃掉一截，所以要加回去。
+  return {
+    width: Math.ceil(width + padX + 24),
+    height: Math.ceil(height + padY + 24),
+  };
+}
+
+async function captureFullPng(el, backgroundColor) {
+  const restore = unlockAncestors(el);
+  try {
+    await waitFrames(2);
+    const { width, height } = measureCaptureBox(el);
+    const ratio = Math.min(2, MAX_CANVAS / width, MAX_CANVAS / height);
+    const dataUrl = await toPng(el, {
+      pixelRatio: ratio,
+      backgroundColor,
+      cacheBust: true,
+      skipAutoScale: true,
+      width,
+      height,
+      filter: (node) => !(node.classList && node.classList.contains("no-export")),
+      style: {
+        margin: "0",
+        maxWidth: "none",
+        maxHeight: "none",
+        overflow: "visible",
+        boxSizing: "border-box",
+        transform: "none",
+      },
+      onclone: (doc, clone) => {
+        const root = clone instanceof HTMLElement ? clone : doc.body?.firstElementChild;
+        if (root instanceof HTMLElement) expandClone(root);
+      },
+    });
+    return dataUrl;
+  } finally {
+    restore();
+  }
+}
+
+export async function exportSharePng(el, { filename, title, backgroundColor = "#0e1116" } = {}) {
+  if (!el) throw new Error("没有可导出的内容");
+  el.classList.add("exporting");
+  try {
+    await nextTick();
+    const dataUrl = await captureFullPng(el, backgroundColor);
+    const res = await fetch(dataUrl);
+    const blob = await res.blob();
+    return sharePngBlob(blob, { filename, title });
+  } finally {
+    el.classList.remove("exporting");
+  }
+}
+
 function wrapText(ctx, text, maxWidth) {
   const raw = (text || "").trim();
   if (!raw) return [];
@@ -180,23 +344,4 @@ export async function renderRelationMapPng({
   ctx.fillText("Judy · 活跃关系图谱", pad, y + 22);
 
   return canvasToPngBlob(canvas);
-}
-
-export async function exportSharePng(el, { filename, title, backgroundColor = "#0e1116" } = {}) {
-  if (!el) throw new Error("没有可导出的内容");
-  el.classList.add("exporting");
-  try {
-    await nextTick();
-    const dataUrl = await toPng(el, {
-      pixelRatio: 2,
-      backgroundColor,
-      cacheBust: true,
-      filter: (node) => !(node.classList && node.classList.contains("no-export")),
-    });
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
-    return sharePngBlob(blob, { filename, title });
-  } finally {
-    el.classList.remove("exporting");
-  }
 }

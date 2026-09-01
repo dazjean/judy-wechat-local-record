@@ -11,6 +11,21 @@
       <el-form-item label="本机系统号">
         <el-input :model-value="form.wechat_wxid || form.wechat_account" disabled placeholder="完成微信读取初始化后自动识别" />
       </el-form-item>
+      <el-form-item v-if="accounts.length > 1" label="本机出现过的微信号">
+        <div class="accounts">
+          <p class="hint block">只读切换查看，不影响当前同步写入哪个号。默认仍是当前登录号。</p>
+          <div v-for="row in accounts" :key="row.id" class="account-row">
+            <div>
+              <b>{{ row.display_name || row.account_key }}</b>
+              <span class="hint">{{ row.account_key }}</span>
+              <span v-if="row.is_current" class="hint">当前登录</span>
+              <span v-else-if="viewingId === row.id" class="hint">查看中</span>
+            </div>
+            <el-button v-if="!row.is_current && viewingId !== row.id" link type="primary" @click="viewAccount(row.id)">查看此号</el-button>
+            <el-button v-else-if="!row.is_current" link type="primary" @click="viewAccount(null)">回到当前登录号</el-button>
+          </div>
+        </div>
+      </el-form-item>
       <el-form-item label="我的微信昵称">
         <el-input v-model="form.self_nickname" placeholder="聊天气泡里显示的本机昵称，不填则显示「我」" />
       </el-form-item>
@@ -78,7 +93,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, inject, onMounted, reactive, ref } from "vue";
 import { ElLoading, ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api";
 
@@ -104,6 +119,14 @@ const lexicon = ref([]);
 const restarting = ref(false);
 const newItem = reactive({ kind: "forbidden", term: "" });
 const license = ref({ ok: true, mode: "development", customer: "", version: "", message: "" });
+const accounts = inject("accounts", ref([]));
+const setViewingAccount = inject("setViewingAccount", () => {});
+const viewingAccount = inject("viewingAccount", ref(null));
+const viewingId = computed(() => viewingAccount.value?.id || null);
+
+function viewAccount(id) {
+  setViewingAccount(id);
+}
 const licenseText = computed(() => {
   if (license.value.mode === "development") return "开发模式";
   if (license.value.ok) return `已授权${license.value.customer ? ` · ${license.value.customer}` : ""}`;
@@ -237,4 +260,14 @@ onMounted(load);
 .path-block { display: flex; gap: 8px; width: 100%; }
 .path-block :deep(.el-input) { flex: 1; }
 .add { display: flex; gap: 8px; margin-top: 12px; max-width: 420px; }
+.accounts { width: 100%; }
+.account-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.account-row b { margin-right: 8px; }
 </style>

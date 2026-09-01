@@ -45,7 +45,7 @@ def _response_stats(messages: list[Message], timeout_seconds: int) -> tuple[list
 def run_rule_scan(db: Session, account_id: int | None = None) -> dict:
     timeout = settings.timeout_seconds
     q = db.query(Conversation)
-    if account_id:
+    if account_id is not None:
         q = q.filter(Conversation.account_id == account_id)
     conversations = q.all()
     daily: dict[tuple[int, str], dict] = defaultdict(
@@ -85,7 +85,10 @@ def run_rule_scan(db: Session, account_id: int | None = None) -> dict:
         bucket["avgs"].extend(avgs)
         bucket["timeout_count"] += timeouts
 
-    db.query(MetricDaily).delete()
+    if account_id is not None:
+        db.query(MetricDaily).filter(MetricDaily.account_id == account_id).delete()
+    else:
+        db.query(MetricDaily).delete()
     for (acc_id, day), bucket in daily.items():
         first_avg = (
             sum(bucket["firsts"]) / len(bucket["firsts"]) if bucket["firsts"] else None
@@ -103,11 +106,14 @@ def run_rule_scan(db: Session, account_id: int | None = None) -> dict:
             )
         )
 
-    db.query(HitRecord).delete()
+    if account_id is not None:
+        db.query(HitRecord).filter(HitRecord.account_id == account_id).delete()
+    else:
+        db.query(HitRecord).delete()
     terms = db.query(Lexicon).filter_by(enabled=True).all()
     if terms:
         msg_q = db.query(Message).filter(Message.sender_role == "cs", Message.msg_type == "text")
-        if account_id:
+        if account_id is not None:
             msg_q = msg_q.filter(Message.account_id == account_id)
         for msg in msg_q.all():
             text = msg.content or ""
@@ -125,4 +131,7 @@ def run_rule_scan(db: Session, account_id: int | None = None) -> dict:
                         )
                     )
     db.commit()
-    return {"days": len(daily), "hits": db.query(HitRecord).count()}
+    hits_q = db.query(HitRecord)
+    if account_id is not None:
+        hits_q = hits_q.filter(HitRecord.account_id == account_id)
+    return {"days": len(daily), "hits": hits_q.count()}

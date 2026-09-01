@@ -99,9 +99,9 @@ def main() -> int:
     if not _port_open(host, port):
         threading.Thread(target=_start_server, args=(host, port), daemon=True).start()
         owned = True
-        if not _wait_health(url):
-            _alert("Judy 未能启动本机服务，请先退出 Judy 后再打开。")
-            raise SystemExit(1)
+    if not _wait_health(url):
+        _alert("Judy 未能启动本机服务，请先退出 Judy 后再打开。")
+        raise SystemExit(1)
     print(f"{PRODUCT_NAME} {PRODUCT_VERSION}  {url}")
     if os.environ.get("JUDY_NO_WINDOW") == "1":
         if owned:

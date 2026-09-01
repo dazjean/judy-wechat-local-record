@@ -165,11 +165,15 @@ def list_radar(
     start_date: str = "",
     end_date: str = "",
     status: str = "",
+    account_id: int | None = None,
     now: datetime | None = None,
 ) -> dict:
     now = now or datetime.now()
     timeout_seconds = settings.timeout_seconds
-    contacts = db.query(Contact).order_by(Contact.id.asc()).all()
+    contacts_q = db.query(Contact).order_by(Contact.id.asc())
+    if account_id is not None:
+        contacts_q = contacts_q.filter(Contact.account_id == account_id)
+    contacts = contacts_q.all()
     items: list[dict] = []
     for contact in contacts:
         if contact_is_official(db, contact):

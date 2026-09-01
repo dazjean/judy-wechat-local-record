@@ -132,3 +132,14 @@ def test_pending_until_wechat_identity(tmp_path: Path):
     status = evaluate(path=path, public_pem=pub)
     assert not status.ok
     assert status.mode == "pending_wechat"
+
+
+def test_source_run_without_license_file_is_development(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("LINGXI_LICENSE_SKIP", raising=False)
+    monkeypatch.delenv("JUDY_DEPLOY", raising=False)
+    monkeypatch.setattr("app.config.frozen", lambda: False)
+    monkeypatch.setattr("app.config.deployed", lambda: False)
+    monkeypatch.setattr("app.license.license_path", lambda: tmp_path / "license.dat")
+    status = evaluate()
+    assert status.ok
+    assert status.mode == "development"

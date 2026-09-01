@@ -37,7 +37,7 @@ def _pct(part: int, whole: int) -> float | None:
 
 def diagnostic_stats(db: Session, start_date: str = "", end_date: str = "", account_id: int | None = None) -> dict:
     q = db.query(Message).join(Contact, Message.contact_id == Contact.id)
-    if account_id:
+    if account_id is not None:
         q = q.filter(Message.account_id == account_id)
     if start_date:
         q = q.filter(Message.msg_time >= f"{start_date} 00:00:00")

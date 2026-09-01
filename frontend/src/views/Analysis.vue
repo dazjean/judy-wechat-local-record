@@ -12,9 +12,6 @@
         <span>范围：<b>{{ rangeLabel }}</b></span>
         <span>提示词：<b>{{ currentPromptName || "默认" }}</b></span>
         <span class="no-export meta-actions">
-          <el-select v-model="promptId" placeholder="选择提示词" style="width: 220px" @change="loadResult">
-            <el-option v-for="p in prompts" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
           <el-button link type="primary" @click="goPrompts">管理提示词</el-button>
           <el-button type="primary" :loading="busy" @click="run">发起分析</el-button>
           <el-button :loading="exporting" :disabled="!canExport || busy" @click="exportImage">导出图片</el-button>
@@ -41,11 +38,14 @@
     <section class="history-panel no-export">
       <div class="sec-head">
         <div class="sec-no">00 / HISTORY</div>
-        <div class="sec-title">历史报告</div>
-        <div class="sec-desc">按日期留存。点开查看当时的完整报告；列表在框内滚动，不会把整页拉长。</div>
+        <div class="sec-title">
+          本场景分析记录
+          <span v-if="history.length" class="sec-count">{{ history.length }}</span>
+        </div>
+        <div class="sec-desc">只显示当前提示词场景留下的报告。按日期留存，点开查看当时的完整内容。</div>
       </div>
-      <p v-if="!history.length" class="empty-history">还没有历史报告。发起分析后会出现在这里。</p>
-      <div v-else class="history-scroll">
+      <p v-if="!history.length" class="empty-history">本场景还没有分析记录。发起分析后会出现在这里。</p>
+      <div v-else class="history-scroll" :class="{ expanded: historyExpanded }">
         <div v-for="g in historyGroups" :key="g.day" class="h-group">
           <div class="h-day">{{ g.label }} · {{ g.items.length }}</div>
           <button
@@ -59,6 +59,14 @@
             {{ item.title }}
           </button>
         </div>
+        <button
+          v-if="historyHiddenCount > 0 || historyExpanded"
+          type="button"
+          class="h-more"
+          @click="historyExpanded = !historyExpanded"
+        >
+          {{ historyMoreLabel }}
+        </button>
       </div>
     </section>
 
@@ -243,13 +251,14 @@
 
 <script setup>
 import { computed, inject, onMounted, onUnmounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { api } from "../api";
 import { exportSharePng, shareFilename } from "../exportImage";
 import { formatDate, formatTime } from "../formatTime";
 
 const filter = inject("filter");
+const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const job = ref(null);
@@ -258,8 +267,13 @@ const payload = ref(null);
 const stats = ref({});
 const hits = ref([]);
 const prompts = ref([]);
-const promptId = ref(null);
+const promptId = computed(() => {
+  const n = Number(route.params.promptId);
+  return Number.isFinite(n) && n > 0 ? n : null;
+});
+const HISTORY_PREVIEW = 10;
 const history = ref([]);
+const historyExpanded = ref(false);
 const selectedResultId = ref(null);
 const latestResultId = ref(null);
 const selectedTitle = ref("");
@@ -303,10 +317,19 @@ const canExport = computed(() => Boolean(payload.value) || Number(stats.value.ms
 const viewingHistory = computed(() => {
   return Boolean(selectedResultId.value && latestResultId.value && selectedResultId.value !== latestResultId.value);
 });
+const visibleHistory = computed(() => {
+  if (historyExpanded.value || history.value.length <= HISTORY_PREVIEW) return history.value;
+  return history.value.slice(0, HISTORY_PREVIEW);
+});
+const historyHiddenCount = computed(() => Math.max(0, history.value.length - HISTORY_PREVIEW));
+const historyMoreLabel = computed(() => {
+  if (historyExpanded.value) return "收起较早记录";
+  return `还有 ${historyHiddenCount.value} 条更早的记录`;
+});
 const historyGroups = computed(() => {
   const groups = [];
   const map = {};
-  for (const item of history.value) {
+  for (const item of visibleHistory.value) {
     const day = (item.created_at || "").slice(0, 10) || "未标注日期";
     if (!map[day]) {
       map[day] = { day, label: day === "未标注日期" ? day : formatDate(day), items: [] };
@@ -378,10 +401,13 @@ async function exportImage() {
 async function loadPrompts() {
   const rows = (await api.prompts()).filter((p) => p.enabled && p.kind !== "group" && p.kind !== "group_digest");
   prompts.value = rows;
-  if (!promptId.value) {
-    const def = rows.find((p) => p.is_default) || rows[0];
-    promptId.value = def ? def.id : null;
+  if (promptId.value) return true;
+  const def = rows.find((p) => p.is_default) || rows[0];
+  if (def) {
+    await router.replace(`/analysis/${def.id}`);
+    return false;
   }
+  return true;
 }
 
 async function loadHits() {
@@ -392,7 +418,14 @@ async function loadHits() {
   });
 }
 
+function sceneHistory(rows) {
+  const pid = promptId.value;
+  if (!pid) return [];
+  return (rows || []).filter((item) => Number(item.prompt_id) === Number(pid));
+}
+
 async function loadResult() {
+  if (!promptId.value) return;
   const data = await api.analysisResults({
     start_date: filter.value.start_date,
     end_date: filter.value.end_date,
@@ -400,7 +433,8 @@ async function loadResult() {
   });
   payload.value = data.payload;
   stats.value = data.stats || {};
-  history.value = data.history || [];
+  history.value = sceneHistory(data.history);
+  historyExpanded.value = false;
   selectedResultId.value = data.result_id || null;
   latestResultId.value = data.result_id || null;
   selectedTitle.value = data.title || "";
@@ -409,7 +443,7 @@ async function loadResult() {
 async function openHistory(item) {
   const data = await api.analysisResult(item.id);
   payload.value = data.payload;
-  history.value = data.history || history.value;
+  if (data.history) history.value = sceneHistory(data.history);
   selectedResultId.value = data.result_id || item.id;
   selectedTitle.value = data.title || item.title || "";
 }
@@ -485,14 +519,25 @@ function stop() {
 }
 
 onMounted(async () => {
-  await loadPrompts();
+  const ready = await loadPrompts();
   loadHits();
-  loadResult();
+  if (ready && promptId.value) loadResult();
 });
 watch(filter, () => {
   loadHits();
-  loadResult();
+  if (promptId.value) loadResult();
 }, { deep: true });
+watch(
+  () => route.params.promptId,
+  (id, prev) => {
+    if (id === prev) return;
+    stop();
+    stopTick();
+    job.value = null;
+    displayPercent.value = 0;
+    if (promptId.value) loadResult();
+  }
+);
 onUnmounted(() => {
   stop();
   stopTick();
@@ -501,7 +546,25 @@ onUnmounted(() => {
 
 <style scoped>
 .report { max-width: 1080px; margin: 0 auto; color: var(--ink); }
-.report.exporting { padding: 28px 32px 16px; }
+.report.exporting {
+  padding: 28px 40px 24px;
+  overflow: visible;
+  height: auto;
+  max-height: none;
+  max-width: none;
+}
+.report.exporting :deep(.el-table),
+.report.exporting :deep(.el-table__inner-wrapper),
+.report.exporting :deep(.el-table__body-wrapper),
+.report.exporting :deep(.el-table__header-wrapper),
+.report.exporting :deep(.el-scrollbar),
+.report.exporting :deep(.el-scrollbar__wrap),
+.report.exporting :deep(.el-scrollbar__view) {
+  height: auto !important;
+  max-height: none !important;
+  max-width: none !important;
+  overflow: visible !important;
+}
 .share-only { display: none; }
 .report.exporting .no-export { display: none !important; }
 .report.exporting .share-only { display: block; }
@@ -528,14 +591,34 @@ h1 { font-size: clamp(28px, 5vw, 48px); font-weight: 800; letter-spacing: -0.02e
 .progress-wrap :deep(.el-progress-bar__inner) { background: linear-gradient(90deg, var(--accent), #ff9a6a); }
 .history-panel { padding-top: 28px; }
 .empty-history { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.sec-count {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
 .history-scroll {
   margin-top: 16px;
-  max-height: 240px;
+  max-height: 420px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
 }
+.history-scroll.expanded { max-height: 560px; }
+.h-more {
+  appearance: none;
+  width: calc(100% - 16px);
+  margin: 0 8px 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.h-more:hover { color: var(--accent); border-color: var(--accent); }
 .h-day {
   position: sticky;
   top: 0;

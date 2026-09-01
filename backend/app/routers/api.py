@@ -10,6 +10,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.accounts import (
+    MissingWxid,
+    UnknownAccount,
+    account_public,
+    current_account,
+    current_account_key,
+    last_account_key,
+    migrate_local_accounts,
+    resolve_account_scope,
+)
 from app.analyze.jobs import job_report_type, make_result_title, run_analysis_job
 from app.analyze.prompt_generate import generate_prompt_body
 from app.analyze.prompt_store import PROMPT_KINDS, get_digest_prompt, get_prompt, seed_default_prompts, set_default
@@ -40,6 +50,7 @@ from app.engine.review import (
     format_seconds,
     last_sync_info,
     list_review_items,
+    list_review_page,
     timeout_items,
 )
 from app.engine.speakers import PLACEHOLDER_SELF, speaker_label
@@ -73,6 +84,18 @@ from app.models import (
 )
 
 router = APIRouter()
+
+
+def _scope_account(db: Session, account_id: int | None = None) -> Account | None:
+    try:
+        return resolve_account_scope(db, account_id)
+    except UnknownAccount:
+        raise HTTPException(404, "账号不存在") from None
+
+
+def _scope_id(db: Session, account_id: int | None = None) -> int | None:
+    acc = _scope_account(db, account_id)
+    return acc.id if acc else None
 
 
 class SettingOut(BaseModel):
@@ -222,7 +245,7 @@ def license_status(db: Session = Depends(get_db)):
 
 
 def _self_nickname(db: Session) -> str:
-    account = db.query(Account).filter_by(account_key="local").one_or_none()
+    account = current_account(db, create=False)
     name = (account.display_name if account else "") or ""
     if name in PLACEHOLDER_SELF:
         return ""
@@ -231,22 +254,11 @@ def _self_nickname(db: Session) -> str:
 
 def _set_self_nickname(db: Session, name: str) -> None:
     clean = (name or "").strip()
-    account = db.query(Account).filter_by(account_key="local").one_or_none()
+    key = current_account_key()
+    account = current_account(db, create=bool(key))
     if not account:
-        account = Account(account_key="local", display_name=clean or DEFAULT_SELF_NAME)
-        db.add(account)
         return
     account.display_name = clean or DEFAULT_SELF_NAME
-
-
-def _local_account_row(db: Session) -> Account:
-    account = db.query(Account).filter_by(account_key="local").one_or_none()
-    if account:
-        return account
-    account = Account(account_key="local", display_name=DEFAULT_SELF_NAME)
-    db.add(account)
-    db.flush()
-    return account
 
 
 def _refresh_wechat_account(db: Session) -> SelfProfile:
@@ -254,7 +266,11 @@ def _refresh_wechat_account(db: Session) -> SelfProfile:
         profile = read_self_profile()
     except Exception:
         profile = SelfProfile()
-    apply_self_profile(_local_account_row(db), profile)
+    migrate_local_accounts(db, current_account_key())
+    key = current_account_key()
+    if key:
+        account = current_account(db, create=True)
+        apply_self_profile(account, profile)
     db.commit()
     return profile
 
@@ -262,7 +278,7 @@ def _refresh_wechat_account(db: Session) -> SelfProfile:
 def _wechat_account_label(db: Session, profile: SelfProfile | None = None) -> str:
     if profile and profile.display_account():
         return profile.display_account()
-    account = db.query(Account).filter_by(account_key="local").one_or_none()
+    account = current_account(db, create=False)
     return ((account.wx_username if account else "") or "").strip()
 
 
@@ -525,8 +541,17 @@ def generate_prompt(body: PromptGenerateIn, db: Session = Depends(get_db)):
 
 @router.get("/accounts")
 def list_accounts(db: Session = Depends(get_db)):
-    rows = db.query(Account).all()
-    return [{"id": r.id, "account_key": r.account_key, "display_name": r.display_name} for r in rows]
+    _refresh_wechat_account(db)
+    current_key = current_account_key()
+    last_key = last_account_key(db)
+    rows = db.query(Account).order_by(Account.id.asc()).all()
+    out = []
+    for row in rows:
+        item = account_public(row, current_key=current_key, last_key=last_key)
+        item["conversation_count"] = db.query(Conversation).filter_by(account_id=row.id).count()
+        item["message_count"] = db.query(Message).filter_by(account_id=row.id).count()
+        out.append(item)
+    return out
 
 
 @router.get("/wechat/status")
@@ -536,6 +561,9 @@ def wechat_status(db: Session = Depends(get_db)):
     evaluate(username=current_folder_wxid())
     status["wechat_account"] = _wechat_account_label(db, profile)
     status["wechat_wxid"] = _wechat_wxid(db, profile)
+    account = current_account(db, create=False)
+    status["account_id"] = account.id if account else None
+    status["account_key"] = account.account_key if account else current_account_key()
     job = current_sync_job(db)
     status["last_sync"] = last_sync_info(db)
     status["auto_sync"] = auto_sync_status(db)
@@ -575,8 +603,12 @@ def groups_index(
     start_date: str = "",
     end_date: str = "",
     q: str = "",
+    account_id: int | None = None,
 ):
-    return {"items": list_groups(db, start_date, end_date, q)}
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {"items": []}
+    return {"items": list_groups(db, start_date, end_date, q, account_id=scoped)}
 
 
 @router.get("/groups/{contact_id}")
@@ -586,12 +618,14 @@ def group_detail(
     start_date: str = "",
     end_date: str = "",
     min_msgs: int = Query(default=1, ge=1, le=50),
+    account_id: int | None = None,
 ):
+    scoped = _scope_id(db, account_id)
     contact = db.get(Contact, contact_id)
-    if not is_group_contact(contact):
+    if not is_group_contact(contact) or scoped is None or contact.account_id != scoped:
         raise HTTPException(404, "群不存在")
     members = list_members(db, contact, start_date, end_date, min_msgs)
-    groups = [g for g in list_groups(db, start_date, end_date) if g["id"] == contact_id]
+    groups = [g for g in list_groups(db, start_date, end_date, account_id=scoped) if g["id"] == contact_id]
     info = groups[0] if groups else {
         "id": contact.id,
         "name": contact_label(contact),
@@ -621,9 +655,15 @@ def group_detail(
 
 
 @router.patch("/groups/{contact_id}/members")
-def patch_group_member(contact_id: int, body: MemberMarkIn, db: Session = Depends(get_db)):
+def patch_group_member(
+    contact_id: int,
+    body: MemberMarkIn,
+    db: Session = Depends(get_db),
+    account_id: int | None = None,
+):
+    scoped = _scope_id(db, account_id)
     contact = db.get(Contact, contact_id)
-    if not is_group_contact(contact):
+    if not is_group_contact(contact) or scoped is None or contact.account_id != scoped:
         raise HTTPException(404, "群不存在")
     try:
         row = upsert_mark(
@@ -686,13 +726,16 @@ def start_sync(body: SyncIn, db: Session = Depends(get_db)):
     if sync_busy(db):
         raise HTTPException(409, "已有同步任务在进行，请稍后再试")
     _persist_sync_scope(db, body)
-    job = enqueue_sync(
-        db,
-        days=body.days,
-        reason="手动同步开始",
-        limit_per_contact=body.limit_per_contact,
-        limit_per_group=body.limit_per_group,
-    )
+    try:
+        job = enqueue_sync(
+            db,
+            days=body.days,
+            reason="手动同步开始",
+            limit_per_contact=body.limit_per_contact,
+            limit_per_group=body.limit_per_group,
+        )
+    except MissingWxid as exc:
+        raise HTTPException(400, str(exc)) from None
     if not job:
         raise HTTPException(409, "已有同步任务在进行，请稍后再试")
     return {
@@ -738,17 +781,20 @@ def list_conversations(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
-    annotated = list_review_items(
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {"total": 0, "items": []}
+    items, total = list_review_page(
         db,
-        account_id=account_id,
+        account_id=scoped,
         start_date=start_date,
         end_date=end_date,
         q=q,
         flag=flag,
+        page=page,
+        page_size=page_size,
     )
-    total = len(annotated)
-    start = (page - 1) * page_size
-    return {"total": total, "items": annotated[start : start + page_size]}
+    return {"total": total, "items": items}
 
 
 @router.get("/radar")
@@ -757,20 +803,29 @@ def customer_radar(
     start_date: str = "",
     end_date: str = "",
     status: str = "",
+    account_id: int | None = None,
 ):
-    return list_radar(db, start_date=start_date, end_date=end_date, status=status)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {"summary": {}, "items": []}
+    return list_radar(db, start_date=start_date, end_date=end_date, status=status, account_id=scoped)
 
 
 @router.get("/conversations/{conv_id}")
-def get_conversation(conv_id: int, db: Session = Depends(get_db)):
+def get_conversation(conv_id: int, db: Session = Depends(get_db), account_id: int | None = None):
     conv = db.get(Conversation, conv_id)
-    if not conv:
+    scoped = _scope_id(db, account_id)
+    if not conv or scoped is None or conv.account_id != scoped:
         raise HTTPException(status_code=404, detail="会话不存在")
     return annotate_conversation(db, conv)
 
 
 @router.get("/conversations/{conv_id}/messages")
-def conv_messages(conv_id: int, db: Session = Depends(get_db)):
+def conv_messages(conv_id: int, db: Session = Depends(get_db), account_id: int | None = None):
+    conv = db.get(Conversation, conv_id)
+    scoped = _scope_id(db, account_id)
+    if not conv or scoped is None or conv.account_id != scoped:
+        raise HTTPException(status_code=404, detail="会话不存在")
     rows = (
         db.query(Message)
         .filter_by(conversation_id=conv_id)
@@ -823,9 +878,10 @@ def list_messages(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ):
-    q = db.query(Message)
-    if account_id:
-        q = q.filter(Message.account_id == account_id)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {"total": 0, "items": []}
+    q = db.query(Message).filter(Message.account_id == scoped)
     if start_date:
         q = q.filter(Message.msg_time >= f"{start_date} 00:00:00")
     if end_date:
@@ -864,10 +920,28 @@ def export_messages(
     flag: str = "",
     scope: str = "filtered",
 ):
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        apply_filters = scope != "all"
+        filename = export_filename(
+            scope="all" if scope == "all" else "filtered",
+            start_date=start_date if apply_filters else "",
+            end_date=end_date if apply_filters else "",
+            q=q if apply_filters else "",
+            flag=flag if apply_filters else "",
+        )
+        settings.exports_dir.mkdir(parents=True, exist_ok=True)
+        path = settings.exports_dir / filename
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "messages"
+        ws.append(["对方", "时间", "昵称", "发送者", "类型", "内容", "标记"])
+        wb.save(path)
+        return FileResponse(path, filename=filename)
     apply_filters = scope != "all"
     items = list_review_items(
         db,
-        account_id=account_id,
+        account_id=scoped,
         start_date=start_date,
         end_date=end_date,
         q=q,
@@ -918,7 +992,10 @@ def export_messages(
 
 @router.post("/jobs/rule-scan")
 def rule_scan(db: Session = Depends(get_db), account_id: int | None = None):
-    return run_rule_scan(db, account_id)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {"ok": True, "days": 0, "hits": 0}
+    return run_rule_scan(db, scoped)
 
 
 def _ymd(value: str) -> str:
@@ -932,9 +1009,25 @@ def metrics_overview(
     start_date: str = "",
     end_date: str = "",
 ):
-    q = db.query(MetricDaily)
-    if account_id:
-        q = q.filter(MetricDaily.account_id == account_id)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return {
+            "msg_count": 0,
+            "conversation_count": 0,
+            "timeout_count": 0,
+            "first_response_avg": None,
+            "avg_response": None,
+            "first_response_label": "—",
+            "avg_response_label": "—",
+            "median_response": None,
+            "median_response_label": "—",
+            "reply_within_5min": None,
+            "reply_within_1h": None,
+            "last_sync": last_sync_info(db),
+            "timeouts": [],
+            "hits": [],
+        }
+    q = db.query(MetricDaily).filter(MetricDaily.account_id == scoped)
     start = _ymd(start_date)
     end = _ymd(end_date)
     if start:
@@ -948,9 +1041,9 @@ def metrics_overview(
     avgs = [r.avg_response for r in rows if r.avg_response is not None]
     first_avg = sum(firsts) / len(firsts) if firsts else None
     avg_resp = sum(avgs) / len(avgs) if avgs else None
-    hits = list_hits(db, kind="forbidden", start_date=start_date, end_date=end_date)[:8]
-    timeouts = timeout_items(db, start_date, end_date, limit=400)
-    diag = diagnostic_stats(db, start_date, end_date, account_id)
+    hits = list_hits(db, kind="forbidden", start_date=start_date, end_date=end_date, account_id=scoped)[:8]
+    timeouts = timeout_items(db, start_date, end_date, limit=400, account_id=scoped)
+    diag = diagnostic_stats(db, start_date, end_date, scoped)
     return {
         "msg_count": diag.get("msg_count") or msg_count,
         "conversation_count": diag.get("conversation_count") or conv_count,
@@ -976,9 +1069,10 @@ def metrics_daily(
     start_date: str = "",
     end_date: str = "",
 ):
-    q = db.query(MetricDaily)
-    if account_id:
-        q = q.filter(MetricDaily.account_id == account_id)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return []
+    q = db.query(MetricDaily).filter(MetricDaily.account_id == scoped)
     start = _ymd(start_date)
     end = _ymd(end_date)
     if start:
@@ -1007,8 +1101,12 @@ def list_hits(
     kind: str = "",
     start_date: str = "",
     end_date: str = "",
+    account_id: int | None = None,
 ):
-    q = db.query(HitRecord)
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return []
+    q = db.query(HitRecord).filter(HitRecord.account_id == scoped)
     if kind:
         q = q.filter(HitRecord.kind == kind)
     if start_date:
@@ -1052,13 +1150,16 @@ def _run_analysis(job_id: str) -> None:
 @router.post("/jobs/analysis")
 def start_analysis(body: AnalysisIn, background: BackgroundTasks, db: Session = Depends(get_db)):
     seed_default_prompts(db)
+    account = _scope_account(db, body.account_id)
+    if account is None:
+        raise HTTPException(400, "尚未识别当前微信，请先完成微信读取初始化并登录")
     kind = "group" if body.kind == "group" else "report"
     report_type = body.report_type if body.report_type in ("daily", "weekly", "portrait") else "portrait"
     start_date = body.start_date
     end_date = body.end_date
     if kind == "group":
         contact = db.get(Contact, body.contact_id) if body.contact_id else None
-        if not is_group_contact(contact):
+        if not is_group_contact(contact) or contact.account_id != account.id:
             raise HTTPException(400, "请选择一个已同步的群")
         if report_type in ("daily", "weekly"):
             prompt = get_digest_prompt(db, body.prompt_id, report_type)
@@ -1072,7 +1173,7 @@ def start_analysis(body: AnalysisIn, background: BackgroundTasks, db: Session = 
     job = AnalysisJob(
         id=str(uuid4()),
         status="queued",
-        account_id=body.account_id,
+        account_id=account.id,
         start_date=start_date,
         end_date=end_date,
         prompt_id=prompt.id if prompt else None,
@@ -1165,6 +1266,7 @@ def _list_history(
     kind: str = "report",
     contact_id: int | None = None,
     report_type: str = "portrait",
+    account_id: int | None = None,
 ) -> list[dict]:
     q = (
         db.query(AnalysisResult, AnalysisJob)
@@ -1172,6 +1274,8 @@ def _list_history(
         .filter(AnalysisJob.status == "succeeded")
         .order_by(AnalysisResult.id.desc())
     )
+    if account_id is not None:
+        q = q.filter(AnalysisJob.account_id == account_id)
     if kind == "group":
         q = q.filter(AnalysisJob.kind == "group")
         if contact_id:
@@ -1193,8 +1297,9 @@ def _analysis_out(
     start_date: str,
     end_date: str,
     history: list[dict],
+    account_id: int | None = None,
 ) -> dict:
-    stats = diagnostic_stats(db, start_date, end_date, job.account_id if job else None)
+    stats = diagnostic_stats(db, start_date, end_date, job.account_id if job else account_id)
     if not job:
         return {
             "job_id": None,
@@ -1233,10 +1338,14 @@ def latest_analysis(
     kind: str = "report",
     contact_id: int | None = None,
     report_type: str = "",
+    account_id: int | None = None,
 ):
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        return _analysis_out(db, None, None, start_date, end_date, [], account_id=None)
     kind = "group" if kind == "group" else "report"
     rt = report_type if report_type in ("daily", "weekly", "portrait") else "portrait"
-    q = db.query(AnalysisJob).filter_by(status="succeeded")
+    q = db.query(AnalysisJob).filter_by(status="succeeded").filter(AnalysisJob.account_id == scoped)
     if kind == "group":
         q = q.filter(AnalysisJob.kind == "group")
         if contact_id:
@@ -1255,9 +1364,16 @@ def latest_analysis(
         if (cand.start_date or "") == (start_date or "") and (cand.end_date or "") == (end_date or ""):
             job = cand
             break
-    history = _list_history(db, kind=kind, contact_id=contact_id, report_type=rt if kind == "group" else "portrait")
+    history = _list_history(
+        db,
+        prompt_id=prompt_id,
+        kind=kind,
+        contact_id=contact_id,
+        report_type=rt if kind == "group" else "portrait",
+        account_id=scoped,
+    )
     if not job:
-        return _analysis_out(db, None, None, start_date, end_date, history)
+        return _analysis_out(db, None, None, start_date, end_date, history, account_id=scoped)
     result = (
         db.query(AnalysisResult)
         .filter_by(job_id=job.id)
@@ -1268,14 +1384,24 @@ def latest_analysis(
 
 
 @router.get("/analysis/results/{result_id}")
-def get_analysis_result(result_id: int, db: Session = Depends(get_db)):
+def get_analysis_result(result_id: int, db: Session = Depends(get_db), account_id: int | None = None):
     result = db.get(AnalysisResult, result_id)
     if not result:
         raise HTTPException(404, "报告不存在")
     job = db.get(AnalysisJob, result.job_id)
     if not job:
         raise HTTPException(404, "报告不存在")
+    scoped = _scope_id(db, account_id)
+    if scoped is None or (job.account_id is not None and job.account_id != scoped):
+        raise HTTPException(404, "报告不存在")
     kind = "group" if (job.kind or "report") == "group" else "report"
     rt = job_report_type(job) if kind == "group" else "portrait"
-    history = _list_history(db, kind=kind, contact_id=job.contact_id, report_type=rt)
+    history = _list_history(
+        db,
+        prompt_id=job.prompt_id if kind != "group" else None,
+        kind=kind,
+        contact_id=job.contact_id,
+        report_type=rt,
+        account_id=job.account_id if job.account_id is not None else scoped,
+    )
     return _analysis_out(db, job, result, job.start_date or "", job.end_date or "", history)

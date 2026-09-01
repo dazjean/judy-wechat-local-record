@@ -65,7 +65,21 @@ def infer_msg_type(content: str) -> str:
     return "text"
 
 
-def parse_history_lines(lines: list[str], peer_key: str) -> list[ParsedMessage]:
+def message_raw_hash(
+    peer_key: str,
+    msg_time: datetime,
+    role: str,
+    sender: str,
+    content: str,
+    account_key: str = "",
+) -> str:
+    payload = f"{peer_key}|{msg_time.isoformat()}|{role}|{sender}|{content}"
+    if account_key:
+        payload = f"{account_key}|{payload}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_history_lines(lines: list[str], peer_key: str, account_key: str = "") -> list[ParsedMessage]:
     parsed: list[ParsedMessage] = []
     for line in lines:
         if not isinstance(line, str):
@@ -96,9 +110,9 @@ def parse_history_lines(lines: list[str], peer_key: str) -> list[ParsedMessage]:
         content = normalize(content)
         if not content:
             continue
-        digest = hashlib.sha256(
-            f"{peer_key}|{msg_time.isoformat()}|{role}|{sender_display}|{content}".encode("utf-8")
-        ).hexdigest()
+        digest = message_raw_hash(
+            peer_key, msg_time, role, sender_display, content, account_key=account_key
+        )
         parsed.append(
             ParsedMessage(
                 msg_time=msg_time,

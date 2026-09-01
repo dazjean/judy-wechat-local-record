@@ -47,9 +47,19 @@ def folder_wxid(name: str) -> str:
     return username_from_folder(text) or text
 
 
+_FOLDER_WXID_CACHE: tuple[float, str] | None = None
+_FOLDER_WXID_TTL = 20.0
+
+
 def current_folder_wxid() -> str:
+    global _FOLDER_WXID_CACHE
+    now = time.monotonic()
+    if _FOLDER_WXID_CACHE and now - _FOLDER_WXID_CACHE[0] < _FOLDER_WXID_TTL:
+        return _FOLDER_WXID_CACHE[1]
     folder = newest_account_dir() or wechat_account_root()
-    return folder_wxid(folder.name if folder else "")
+    value = folder_wxid(folder.name if folder else "")
+    _FOLDER_WXID_CACHE = (now, value)
+    return value
 
 
 def resolve_self_wxid() -> str:

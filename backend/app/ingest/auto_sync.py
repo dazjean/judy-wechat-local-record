@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.accounts import MissingWxid, require_sync_account
 from app.config import settings
 from app.db import SessionLocal
 from app.engine.metrics import run_rule_scan
@@ -171,6 +172,7 @@ def enqueue_sync(
 ) -> Optional[SyncJob]:
     if sync_busy(db):
         return None
+    account = require_sync_account(db)
     days = max(1, min(int(days or 14), 90))
     if limit_per_contact is None:
         limit_per_contact = settings.sync_limit_per_contact
@@ -181,6 +183,7 @@ def enqueue_sync(
     job = SyncJob(
         id=str(uuid4()),
         status="queued",
+        account_id=account.id,
         start_date=(datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
         limit_per_contact=limit_per_contact,
     )
@@ -253,11 +256,17 @@ def _tick(state: dict) -> None:
         state["fingerprint"] = fp
         state["dirty_since"] = dirty
         if due:
-            enqueue_sync(db, days=settings.sync_days, reason="定时同步开始")
+            try:
+                enqueue_sync(db, days=settings.sync_days, reason="定时同步开始")
+            except MissingWxid:
+                return
             state["dirty_since"] = None
             return
         if watch_hit:
-            enqueue_sync(db, days=settings.sync_days, reason="检测到微信库有更新，开始同步")
+            try:
+                enqueue_sync(db, days=settings.sync_days, reason="检测到微信库有更新，开始同步")
+            except MissingWxid:
+                return
     finally:
         db.close()
 

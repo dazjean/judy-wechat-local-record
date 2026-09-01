@@ -59,10 +59,13 @@ def friend_name_keys(db: Session) -> dict[str, str]:
     return keys
 
 
-def list_groups(db: Session, start_date: str = "", end_date: str = "", q: str = "") -> list[dict]:
+def list_groups(db: Session, start_date: str = "", end_date: str = "", q: str = "", account_id: int | None = None) -> list[dict]:
     needle = (q or "").strip().casefold()
     out: list[dict] = []
-    for contact in db.query(Contact).order_by(Contact.id.asc()).all():
+    contacts = db.query(Contact).order_by(Contact.id.asc())
+    if account_id is not None:
+        contacts = contacts.filter(Contact.account_id == account_id)
+    for contact in contacts.all():
         if not is_group_contact(contact):
             continue
         name = contact_label(contact) or contact.peer_key

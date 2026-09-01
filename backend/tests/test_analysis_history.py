@@ -16,6 +16,7 @@ from app.analyze.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_SALES, SYSTEM_PROMPT
 from app.analyze.prompt_store import PRESET_PROMPTS, seed_default_prompts  # noqa: E402
 from app.db import Base  # noqa: E402
 from app.models import AnalysisJob, AnalysisResult, PromptTemplate  # noqa: E402
+from app.routers.api import _list_history  # noqa: E402
 
 
 def _session() -> Session:
@@ -166,6 +167,58 @@ def test_analysis_results_append_not_overwrite():
     assert json.loads(rows[0].payload_json)["profile"]["title"] == "first"
     assert json.loads(rows[1].payload_json)["profile"]["title"] == "second"
     assert rows[0].title != rows[1].title
+
+
+def test_list_history_keeps_current_scene_and_returns_more_than_ten():
+    db = _session()
+    seed_default_prompts(db)
+    cs = db.query(PromptTemplate).filter_by(name="客服诊断报告").one()
+    sales = db.query(PromptTemplate).filter_by(name="销售诊断报告").one()
+    for i in range(12):
+        db.add(
+            AnalysisJob(
+                id=f"job-cs-{i}",
+                status="succeeded",
+                prompt_id=cs.id,
+                kind="report",
+                start_date="2026-08-01",
+                end_date="2026-08-01",
+            )
+        )
+        db.add(
+            AnalysisResult(
+                job_id=f"job-cs-{i}",
+                title=f"2026-08-01 10:{i:02d} · 客服诊断报告",
+                payload_json="{}",
+            )
+        )
+    for i in range(3):
+        db.add(
+            AnalysisJob(
+                id=f"job-sales-{i}",
+                status="succeeded",
+                prompt_id=sales.id,
+                kind="report",
+                start_date="2026-08-02",
+                end_date="2026-08-02",
+            )
+        )
+        db.add(
+            AnalysisResult(
+                job_id=f"job-sales-{i}",
+                title=f"2026-08-02 11:{i:02d} · 销售诊断报告",
+                payload_json="{}",
+            )
+        )
+    db.commit()
+    current = _list_history(db, prompt_id=cs.id)
+    other = _list_history(db, prompt_id=sales.id)
+    mixed = _list_history(db)
+    assert len(current) == 12
+    assert all(item["prompt_id"] == cs.id for item in current)
+    assert len(other) == 3
+    assert all(item["prompt_id"] == sales.id for item in other)
+    assert len(mixed) == 15
 
 
 def test_set_job_progress_clamps_and_labels():

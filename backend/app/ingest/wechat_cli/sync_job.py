@@ -10,10 +10,10 @@ from app.ingest.wechat_cli import runner
 from app.ingest.wechat_cli.errors import ReaderError
 from app.ingest.media.extract import attach_media
 from app.ingest.media.self_account import apply_self_profile, read_self_profile
-from app.ingest.wechat_cli.parse import ParsedMessage, parse_history_lines, strip_emoji
+from app.ingest.wechat_cli.parse import ParsedMessage, parse_history_lines, strip_emoji, message_raw_hash
 from app.logutil import append_sync_log
+from app.accounts import MissingWxid, require_sync_account
 from app.models import Account, Contact, Conversation, Message, SyncJob
-from app.product import DEFAULT_SELF_NAME
 
 SKIP_NAMES = {
     "文件传输助手",
@@ -308,15 +308,12 @@ def _should_query_contacts(name: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
-def _local_account(db: Session) -> Account:
-    row = db.query(Account).filter_by(account_key="local").one_or_none()
-    if row:
-        return row
-        row = Account(account_key="local", display_name=DEFAULT_SELF_NAME)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
+def _resolve_job_account(db: Session, job: SyncJob) -> Account:
+    if job.account_id:
+        row = db.get(Account, job.account_id)
+        if row:
+            return row
+    return require_sync_account(db)
 
 
 def _get_or_create_contact(db: Session, account: Account, peer_key: str, display: str) -> Contact:
@@ -387,7 +384,14 @@ def _insert_messages(
         if item.raw_hash in seen:
             skipped += 1
             continue
-        exists = db.query(Message).filter_by(raw_hash=item.raw_hash).first()
+        exists = (
+            db.query(Message)
+            .filter(
+                Message.account_id == account.id,
+                Message.raw_hash.in_(_candidate_hashes(account, contact.peer_key, item)),
+            )
+            .first()
+        )
         if exists:
             better = item.media_relpath and (
                 not exists.media_relpath
@@ -422,6 +426,21 @@ def _insert_messages(
         )
         written += 1
     return written, skipped
+
+
+def _candidate_hashes(account: Account, peer_key: str, item: ParsedMessage) -> list[str]:
+    hashes = [item.raw_hash]
+    legacy = message_raw_hash(
+        peer_key,
+        item.msg_time,
+        item.sender_role,
+        item.sender_name,
+        item.content,
+        account_key="",
+    )
+    if legacy not in hashes:
+        hashes.append(legacy)
+    return hashes
 
 
 def sync_finish_outcome(
@@ -498,6 +517,16 @@ def run_sync_job(
     exclude = parse_name_list(exclude_names)
     include = parse_name_list(include_names)
     log("开始同步")
+    try:
+        account = _resolve_job_account(db, job)
+        job.account_id = account.id
+        db.commit()
+    except MissingWxid as exc:
+        job.status = "failed"
+        job.error_message = str(exc)
+        db.commit()
+        log(str(exc))
+        return
     if include:
         log(f"只同步这些人：{len(include)} 个名称（人数上限不生效）")
         log("范围：只同步名单中的会话；写了群名就会同步该群")
@@ -551,7 +580,6 @@ def run_sync_job(
             )
         log(f"待读取 {len(usable)} 个会话")
         log("同步时会提取本机已查看的图片、已下载的文件和语音原条")
-        account = _local_account(db)
         try:
             apply_self_profile(account, read_self_profile())
             db.commit()
@@ -609,7 +637,7 @@ def run_sync_job(
                     hard_error = exc.public_message
                     log(f"失败：{display or key} — {exc.public_message}")
                 continue
-            parsed = parse_history_lines(lines, key)
+            parsed = parse_history_lines(lines, key, account_key=account.account_key)
             if looks_like_official_feed(parsed):
                 skipped_sys += 1
                 log(f"跳过公众号：{display or key}")

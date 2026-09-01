@@ -15,4 +15,8 @@ source "$ROOT/.venv/bin/activate"
 pip install -q -r "$ROOT/backend/requirements.txt"
 
 export PYTHONPATH="$ROOT/backend"
+if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
+  echo "正在构建前端…"
+  (cd "$ROOT/frontend" && npm install && npm run build)
+fi
 exec python -m app.boot

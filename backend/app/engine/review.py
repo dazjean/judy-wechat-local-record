@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 
 from sqlalchemy import or_
@@ -64,13 +65,20 @@ def is_review_noise(contact: Contact | None) -> bool:
     return any(part in label for part in NOISE_LABELS)
 
 
-def contact_is_official(db: Session, contact: Contact | None) -> bool:
+def contact_is_official(db: Session, contact: Contact | None, messages: list[Message] | None = None) -> bool:
     if not contact:
         return False
     if is_review_noise(contact):
         return True
-    msgs = db.query(Message).filter_by(contact_id=contact.id).all()
-    return looks_like_official_feed(msgs)
+    if messages is None:
+        messages = (
+            db.query(Message)
+            .filter_by(contact_id=contact.id)
+            .order_by(Message.msg_time.desc())
+            .limit(50)
+            .all()
+        )
+    return looks_like_official_feed(messages)
 
 
 def _load_messages(db: Session, conv_id: int) -> list[Message]:
@@ -82,15 +90,8 @@ def _load_messages(db: Session, conv_id: int) -> list[Message]:
     )
 
 
-def conversation_flags(db: Session, conv: Conversation) -> dict:
-    msgs = _load_messages(db, conv.id)
+def _flags_from_messages(msgs: list[Message], hit: bool) -> dict:
     _firsts, _avgs, timeouts = _response_stats(msgs, settings.timeout_seconds)
-    has_hit = (
-        db.query(HitRecord.id)
-        .filter(HitRecord.conversation_id == conv.id, HitRecord.kind == "forbidden")
-        .first()
-        is not None
-    )
     missing_media = any(
         m.msg_type in {"image", "voice", "file"} and (m.media_status == "missing" or not m.media_relpath)
         for m in msgs
@@ -98,15 +99,24 @@ def conversation_flags(db: Session, conv: Conversation) -> dict:
     return {
         "timeout": timeouts > 0,
         "timeout_count": timeouts,
-        "forbidden": has_hit,
+        "forbidden": hit,
         "missing_media": missing_media,
         "official": looks_like_official_feed(msgs),
     }
 
 
-def annotate_conversation(db: Session, conv: Conversation) -> dict:
-    contact = db.get(Contact, conv.contact_id)
-    flags = conversation_flags(db, conv)
+def conversation_flags(db: Session, conv: Conversation) -> dict:
+    msgs = _load_messages(db, conv.id)
+    has_hit = (
+        db.query(HitRecord.id)
+        .filter(HitRecord.conversation_id == conv.id, HitRecord.kind == "forbidden")
+        .first()
+        is not None
+    )
+    return _flags_from_messages(msgs, has_hit)
+
+
+def _item_from_flags(conv: Conversation, contact: Contact | None, flags: dict) -> dict:
     return {
         "id": conv.id,
         "contact": contact_label(contact),
@@ -117,8 +127,14 @@ def annotate_conversation(db: Session, conv: Conversation) -> dict:
         "timeout_count": flags["timeout_count"],
         "forbidden": flags["forbidden"],
         "missing_media": flags["missing_media"],
-        "noise": contact_is_official(db, contact),
+        "noise": is_review_noise(contact) or flags["official"],
     }
+
+
+def annotate_conversation(db: Session, conv: Conversation, contact: Contact | None = None) -> dict:
+    contact = contact or db.get(Contact, conv.contact_id)
+    flags = conversation_flags(db, conv)
+    return _item_from_flags(conv, contact, flags)
 
 
 def last_sync_info(db: Session) -> dict | None:
@@ -135,15 +151,17 @@ def last_sync_info(db: Session) -> dict | None:
     }
 
 
-def timeout_items(db: Session, start_date: str, end_date: str, limit: int = 8) -> list[dict]:
-    rows = _convs_in_range(db, start_date, end_date)
+def timeout_items(
+    db: Session, start_date: str, end_date: str, limit: int = 8, account_id: int | None = None
+) -> list[dict]:
+    rows = _convs_in_range(db, start_date, end_date, account_id=account_id)
     out: list[dict] = []
     for conv in rows:
         contact = db.get(Contact, conv.contact_id)
-        if contact_is_official(db, contact):
+        if is_review_noise(contact):
             continue
         flags = conversation_flags(db, conv)
-        if not flags["timeout"]:
+        if flags["official"] or not flags["timeout"]:
             continue
         out.append(
             {
@@ -158,8 +176,12 @@ def timeout_items(db: Session, start_date: str, end_date: str, limit: int = 8) -
     return out
 
 
-def _convs_in_range(db: Session, start_date: str, end_date: str) -> list[Conversation]:
+def _convs_in_range(
+    db: Session, start_date: str, end_date: str, account_id: int | None = None
+) -> list[Conversation]:
     q = db.query(Conversation)
+    if account_id is not None:
+        q = q.filter(Conversation.account_id == account_id)
     if start_date:
         q = q.filter(Conversation.last_msg_at >= f"{start_date} 00:00:00")
     if end_date:
@@ -167,19 +189,18 @@ def _convs_in_range(db: Session, start_date: str, end_date: str) -> list[Convers
     return q.order_by(Conversation.last_msg_at.desc()).limit(400).all()
 
 
-def list_review_items(
+def _candidate_pairs(
     db: Session,
     *,
-    account_id: int | None = None,
-    start_date: str = "",
-    end_date: str = "",
-    q: str = "",
-    flag: str = "",
-    apply_filters: bool = True,
-    max_convs: int = 400,
-) -> list[dict]:
-    query = db.query(Conversation).join(Contact, Conversation.contact_id == Contact.id)
-    if account_id:
+    account_id: int | None,
+    start_date: str,
+    end_date: str,
+    q: str,
+    apply_filters: bool,
+    max_convs: int,
+) -> list[tuple[Conversation, Contact]]:
+    query = db.query(Conversation, Contact).join(Contact, Conversation.contact_id == Contact.id)
+    if account_id is not None:
         query = query.filter(Conversation.account_id == account_id)
     if apply_filters:
         if start_date:
@@ -193,20 +214,109 @@ def list_review_items(
                 or_(Contact.remark.like(like), Contact.nickname.like(like), Contact.peer_key.like(like))
             )
     rows = query.order_by(Conversation.last_msg_at.desc()).limit(max_convs).all()
-    out: list[dict] = []
-    for conv in rows:
-        item = annotate_conversation(db, conv)
-        if item["noise"]:
-            continue
-        if apply_filters:
-            if flag == "timeout" and not item["timeout"]:
-                continue
-            if flag == "forbidden" and not item["forbidden"]:
-                continue
-            if flag == "missing_media" and not item["missing_media"]:
-                continue
-        out.append(item)
-    return out
+    return [(conv, contact) for conv, contact in rows if not is_review_noise(contact)]
+
+
+def _annotate_chunk(db: Session, pairs: list[tuple[Conversation, Contact]]) -> list[dict]:
+    ids = [conv.id for conv, _ in pairs]
+    if not ids:
+        return []
+    msgs = (
+        db.query(Message)
+        .filter(Message.conversation_id.in_(ids))
+        .order_by(Message.conversation_id.asc(), Message.msg_time.asc())
+        .all()
+    )
+    by_conv: dict[int, list[Message]] = defaultdict(list)
+    for msg in msgs:
+        by_conv[msg.conversation_id].append(msg)
+    hit_ids = {
+        row[0]
+        for row in db.query(HitRecord.conversation_id)
+        .filter(HitRecord.conversation_id.in_(ids), HitRecord.kind == "forbidden")
+        .distinct()
+        .all()
+    }
+    return [
+        _item_from_flags(conv, contact, _flags_from_messages(by_conv.get(conv.id, []), conv.id in hit_ids))
+        for conv, contact in pairs
+    ]
+
+
+def _annotate_many(db: Session, pairs: list[tuple[Conversation, Contact]], chunk: int = 40) -> list[dict]:
+    items: list[dict] = []
+    for i in range(0, len(pairs), chunk):
+        items.extend(_annotate_chunk(db, pairs[i : i + chunk]))
+    return items
+
+
+def _flag_match(item: dict, flag: str) -> bool:
+    if flag == "timeout":
+        return bool(item["timeout"])
+    if flag == "forbidden":
+        return bool(item["forbidden"])
+    if flag == "missing_media":
+        return bool(item["missing_media"])
+    return True
+
+
+def list_review_page(
+    db: Session,
+    *,
+    account_id: int | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    q: str = "",
+    flag: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    max_convs: int = 400,
+) -> tuple[list[dict], int]:
+    pairs = _candidate_pairs(
+        db,
+        account_id=account_id,
+        start_date=start_date,
+        end_date=end_date,
+        q=q,
+        apply_filters=True,
+        max_convs=max_convs,
+    )
+    page = max(1, page)
+    page_size = max(1, page_size)
+    start = (page - 1) * page_size
+    if flag:
+        items = [item for item in _annotate_many(db, pairs) if not item["noise"] and _flag_match(item, flag)]
+        return items[start : start + page_size], len(items)
+    extra = min(40, page_size)
+    window = pairs[start : start + page_size + extra]
+    items = [item for item in _annotate_chunk(db, window) if not item["noise"]][:page_size]
+    return items, len(pairs)
+
+
+def list_review_items(
+    db: Session,
+    *,
+    account_id: int | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    q: str = "",
+    flag: str = "",
+    apply_filters: bool = True,
+    max_convs: int = 400,
+) -> list[dict]:
+    pairs = _candidate_pairs(
+        db,
+        account_id=account_id,
+        start_date=start_date,
+        end_date=end_date,
+        q=q,
+        apply_filters=apply_filters,
+        max_convs=max_convs,
+    )
+    items = [item for item in _annotate_many(db, pairs) if not item["noise"]]
+    if apply_filters and flag:
+        items = [item for item in items if _flag_match(item, flag)]
+    return items
 
 
 def flag_text(item: dict) -> str:

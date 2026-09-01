@@ -597,7 +597,12 @@ h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
   margin-bottom: 10px;
 }
 .digest-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.digest-share.exporting { padding: 8px 4px 0; }
+.digest-share.exporting {
+  padding: 8px 4px 0;
+  overflow: visible;
+  height: auto;
+  max-height: none;
+}
 .share-only { display: none; }
 .digest-share.exporting .share-only { display: block; }
 .digest-brand { margin: 0 0 10px; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; }

@@ -1,6 +1,37 @@
 import axios from "axios";
+import { getViewingAccountId } from "./accountScope";
 
 const http = axios.create({ baseURL: "/api", timeout: 60000 });
+
+const SCOPED = [
+  "/conversations",
+  "/radar",
+  "/messages",
+  "/exports",
+  "/jobs/rule-scan",
+  "/jobs/analysis",
+  "/metrics/",
+  "/hits",
+  "/groups",
+  "/analysis/",
+];
+
+function shouldScope(url) {
+  const path = String(url || "");
+  return SCOPED.some((prefix) => path.includes(prefix));
+}
+
+http.interceptors.request.use((config) => {
+  const id = getViewingAccountId();
+  if (!id || !shouldScope(config.url)) return config;
+  config.params = { ...(config.params || {}), account_id: config.params?.account_id ?? id };
+  const method = (config.method || "get").toLowerCase();
+  if (method === "post" && String(config.url || "").includes("/jobs/analysis")) {
+    const data = config.data && typeof config.data === "object" ? config.data : {};
+    if (data.account_id == null) config.data = { ...data, account_id: id };
+  }
+  return config;
+});
 
 http.interceptors.response.use(
   (r) => r,
@@ -8,7 +39,8 @@ http.interceptors.response.use(
     const data = err.response?.data;
     const msg = data?.message || err.message || "请求失败";
     const error = new Error(msg);
-    error.code = data?.code || "";
+    error.code = data?.code || err.code || "";
+    error.network = !err.response;
     return Promise.reject(error);
   }
 );
@@ -54,6 +86,7 @@ export const api = {
       filename: filenameFromHeader(r.headers["content-disposition"]),
     })),
   radar: (params) => http.get("/radar", { params }).then((r) => r.data),
+  overview: (params) => http.get("/metrics/overview", { params }).then((r) => r.data),
   daily: (params) => http.get("/metrics/daily", { params }).then((r) => r.data),
   hits: (params) => http.get("/hits", { params }).then((r) => r.data),
   ruleScan: () => http.post("/jobs/rule-scan").then((r) => r.data),

@@ -111,6 +111,8 @@ def app_resources() -> Path | None:
         if parent.suffix == ".app":
             res = parent / "Contents" / "Resources"
             return res if res.is_dir() else None
+    if not deployed():
+        return None
     root = project_root()
     res = root / "Judy.app" / "Contents" / "Resources"
     return res if res.is_dir() else None

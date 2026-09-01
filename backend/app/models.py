@@ -51,7 +51,7 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (UniqueConstraint("raw_hash", name="uq_message_hash"),)
+    __table_args__ = (UniqueConstraint("account_id", "raw_hash", name="uq_message_account_hash"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
@@ -76,6 +76,7 @@ class SyncJob(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     start_date: Mapped[str] = mapped_column(String(16), default="")
     limit_per_contact: Mapped[int] = mapped_column(Integer, default=1000)
     total_contacts: Mapped[int] = mapped_column(Integer, default=0)
