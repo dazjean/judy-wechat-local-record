@@ -54,6 +54,21 @@ def test_license_and_web_inside_app(monkeypatch, tmp_path: Path):
     assert settings.frontend_dist == res / "web"
 
 
+def test_root_license_overrides_bundled(monkeypatch, tmp_path: Path):
+    res = tmp_path / "Judy.app" / "Contents" / "Resources"
+    (res / "web").mkdir(parents=True)
+    (res / "license.dat").write_text("bundled-trial", encoding="utf-8")
+    (tmp_path / "license.dat").write_text("paid-override", encoding="utf-8")
+    py = res / "python" / "bin" / "python3"
+    py.parent.mkdir(parents=True)
+    py.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JUDY_ROOT", str(tmp_path))
+    monkeypatch.setattr("app.config.frozen", lambda: False)
+    monkeypatch.setattr(sys, "executable", str(py))
+    settings = Settings()
+    assert settings.license_path == tmp_path / "license.dat"
+
+
 def test_source_python_ignores_sibling_app_license(monkeypatch, tmp_path: Path):
     res = tmp_path / "Judy.app" / "Contents" / "Resources"
     (res / "web").mkdir(parents=True)

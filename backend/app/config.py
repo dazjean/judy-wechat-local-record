@@ -205,6 +205,9 @@ class Settings(BaseSettings):
 
     @property
     def license_path(self) -> Path:
+        override = self.root / "license.dat"
+        if override.is_file():
+            return override
         res = app_resources()
         if res is not None:
             bundled = res / "license.dat"

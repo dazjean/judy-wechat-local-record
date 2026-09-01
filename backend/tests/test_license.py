@@ -109,6 +109,89 @@ def test_expired_license(tmp_path: Path):
     status = evaluate(username="wxid_owner", path=path, public_pem=pub)
     assert not status.ok
     assert status.mode == "expired"
+    assert status.kind == "paid"
+    assert "过期" in status.message
+
+
+def test_legacy_license_without_kind_is_paid():
+    priv, pub = _keys()
+    text = issue_license(customer="庆总", wxids=["wxid_owner"], private_pem=priv)
+    payload = parse_license_text(text, pub)
+    assert payload.kind == "paid"
+
+
+def test_trial_expires_on_seven_days():
+    from app.license import trial_expires_on
+
+    assert trial_expires_on(7, today=date(2026, 9, 1)) == "2026-09-08"
+
+
+def test_trial_license_valid_before_expiry(tmp_path: Path, monkeypatch):
+    priv, pub = _keys()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    text = issue_license(
+        customer="试用客户",
+        wxids=["wxid_owner"],
+        private_pem=priv,
+        expires_at=tomorrow,
+        kind="trial",
+        instance_id="trial-ok",
+    )
+    path = tmp_path / "license.dat"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("JUDY_LICENSE_CLOCK_DIR", str(tmp_path / "clock"))
+    status = evaluate(username="wxid_owner", path=path, public_pem=pub)
+    assert status.ok
+    assert status.kind == "trial"
+    assert status.expires_at == tomorrow
+    assert "试用" in status.message
+    assert status.as_dict()["kind"] == "trial"
+    assert status.as_dict()["trial_ends_on"] == tomorrow
+
+
+def test_trial_expired_uses_trial_copy(tmp_path: Path, monkeypatch):
+    priv, pub = _keys()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    text = issue_license(
+        customer="试用客户",
+        wxids=["wxid_owner"],
+        private_pem=priv,
+        expires_at=yesterday,
+        kind="trial",
+        instance_id="trial-exp",
+    )
+    path = tmp_path / "license.dat"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("JUDY_LICENSE_CLOCK_DIR", str(tmp_path / "clock"))
+    status = evaluate(username="wxid_owner", path=path, public_pem=pub)
+    assert not status.ok
+    assert status.mode == "expired"
+    assert status.kind == "trial"
+    assert "试用已结束" in status.message
+
+
+def test_trial_clock_rollback_expires(tmp_path: Path, monkeypatch):
+    priv, pub = _keys()
+    day0 = date.today()
+    text = issue_license(
+        customer="试用客户",
+        wxids=["wxid_owner"],
+        private_pem=priv,
+        expires_at=(day0 + timedelta(days=1)).isoformat(),
+        kind="trial",
+        instance_id="trial-clock-1",
+    )
+    path = tmp_path / "license.dat"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("JUDY_LICENSE_CLOCK_DIR", str(tmp_path / "clock"))
+    first = evaluate(username="wxid_owner", path=path, public_pem=pub, today=day0)
+    assert first.ok
+    second = evaluate(username="wxid_owner", path=path, public_pem=pub, today=day0 + timedelta(days=1))
+    assert second.ok
+    rolled = evaluate(username="wxid_owner", path=path, public_pem=pub, today=day0)
+    assert not rolled.ok
+    assert rolled.mode == "expired"
+    assert "试用已结束" in rolled.message
 
 
 def test_first_use_binds_then_rejects_other_account(tmp_path: Path):

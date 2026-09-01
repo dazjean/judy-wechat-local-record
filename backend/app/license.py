@@ -7,8 +7,9 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,8 @@ from app.product import PRODUCT_CODE, PRODUCT_NAME, PRODUCT_VERSION
 LICENSE_MAGIC = "LXCS1"
 BIND_MAGIC = "LXBIND1"
 LICENSE_BLOCKED = "license_blocked"
+LICENSE_KINDS = ("trial", "paid")
+DEFAULT_TRIAL_DAYS = 7
 
 
 class LicenseError(Exception):
@@ -40,6 +43,7 @@ class LicensePayload:
     issued_at: str
     expires_at: str
     instance_id: str
+    kind: str = "paid"
 
     def identifiers(self) -> set[str]:
         return {_norm(x) for x in self.wxids if _norm(x)}
@@ -57,6 +61,9 @@ class LicenseStatus:
     version: str = PRODUCT_VERSION
     bind_mode: str = ""
     instance_id: str = ""
+    expires_at: str = ""
+    kind: str = ""
+    trial_ends_on: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +77,9 @@ class LicenseStatus:
             "version": self.version,
             "bind_mode": self.bind_mode,
             "instance_id": self.instance_id,
+            "expires_at": self.expires_at,
+            "kind": self.kind,
+            "trial_ends_on": self.trial_ends_on,
         }
 
 
@@ -117,6 +127,22 @@ def encode_license(payload: dict, signature: bytes) -> str:
     return f"{LICENSE_MAGIC}\n{_b64(_canonical(payload))}\n{_b64(signature)}\n"
 
 
+def normalize_license_kind(kind: str) -> str:
+    k = (kind or "").strip().lower()
+    return k if k in LICENSE_KINDS else "paid"
+
+
+def trial_expires_on(days: int = DEFAULT_TRIAL_DAYS, *, today: date | None = None) -> str:
+    """到期日 = 签发日 + N 天；到期当天仍可用。"""
+    try:
+        n = int(days)
+    except (TypeError, ValueError):
+        n = DEFAULT_TRIAL_DAYS
+    n = max(1, n)
+    clock = today or date.today()
+    return (clock + timedelta(days=n)).isoformat()
+
+
 def parse_license_text(text: str, public_pem: str | None = None) -> LicensePayload:
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if len(lines) < 3 or lines[0] != LICENSE_MAGIC:
@@ -157,6 +183,7 @@ def parse_license_text(text: str, public_pem: str | None = None) -> LicensePaylo
         issued_at=str(payload.get("issued_at") or "").strip(),
         expires_at=str(payload.get("expires_at") or "").strip(),
         instance_id=str(payload.get("instance_id") or "").strip(),
+        kind=normalize_license_kind(str(payload.get("kind") or "")),
     )
 
 
@@ -168,6 +195,7 @@ def issue_license(
     bind_mode: str = "wxid",
     expires_at: str = "",
     instance_id: str = "",
+    kind: str = "paid",
 ) -> str:
     cleaned = [_norm(x) for x in wxids if _norm(x)]
     if bind_mode not in {"wxid", "first_use"}:
@@ -182,6 +210,7 @@ def issue_license(
         "issued_at": date.today().isoformat(),
         "expires_at": (expires_at or "").strip(),
         "instance_id": instance_id or str(uuid4()),
+        "kind": normalize_license_kind(kind),
     }
     return encode_license(payload, sign_payload(payload, private_pem))
 
@@ -282,14 +311,146 @@ def load_payload(path: Path | None = None, public_pem: str | None = None) -> Lic
     return parse_license_text(text, public_pem)
 
 
-def _expired(expires_at: str) -> bool:
-    text = (expires_at or "").strip()
-    if not text:
-        return False
+def _expired(expires_at: str, today: date | None = None) -> bool:
+    parsed = _parse_iso_date(expires_at)
+    if parsed is None:
+        return bool((expires_at or "").strip())
+    return parsed < (today or date.today())
+
+
+def _parse_iso_date(text: str) -> date | None:
+    raw = (text or "").strip()[:10]
+    if not raw:
+        return None
     try:
-        return date.fromisoformat(text[:10]) < date.today()
+        return date.fromisoformat(raw)
     except ValueError:
+        return None
+
+
+def _app_support_dir() -> Path:
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Judy"
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        return Path(base) / "Judy"
+    return home / ".local" / "share" / "judy"
+
+
+def trial_clock_paths() -> list[Path]:
+    override = (os.environ.get("JUDY_LICENSE_CLOCK_DIR") or "").strip()
+    if override:
+        root = Path(override).expanduser()
+        return [root / "clock.json", root / "clock.bak.json"]
+    try:
+        from app.config import settings
+
+        data = settings.data_dir / ".license_clock.json"
+    except Exception:
+        data = Path(".license_clock.json")
+    return [data, _app_support_dir() / "license_clock.json"]
+
+
+def _read_clock_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_trial_record(instance_id: str) -> dict[str, str]:
+    first: date | None = None
+    last: date | None = None
+    for path in trial_clock_paths():
+        records = _read_clock_file(path).get("records")
+        if not isinstance(records, dict):
+            continue
+        rec = records.get(instance_id)
+        if not isinstance(rec, dict):
+            continue
+        fs = _parse_iso_date(str(rec.get("first_seen") or ""))
+        ls = _parse_iso_date(str(rec.get("last_seen") or ""))
+        if fs and (first is None or fs < first):
+            first = fs
+        if ls and (last is None or ls > last):
+            last = ls
+    out: dict[str, str] = {}
+    if first:
+        out["first_seen"] = first.isoformat()
+    if last:
+        out["last_seen"] = last.isoformat()
+    return out
+
+
+def _write_trial_record(instance_id: str, first_seen: str, last_seen: str) -> None:
+    patch = {"first_seen": first_seen, "last_seen": last_seen}
+    for path in trial_clock_paths():
+        try:
+            data = _read_clock_file(path)
+            records = data.get("records")
+            if not isinstance(records, dict):
+                records = {}
+            records[instance_id] = patch
+            data["records"] = records
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except OSError:
+            continue
+
+
+def _trial_duration_days(payload: LicensePayload) -> int:
+    issued = _parse_iso_date(payload.issued_at)
+    expires = _parse_iso_date(payload.expires_at)
+    if issued and expires:
+        return max(1, (expires - issued).days)
+    return DEFAULT_TRIAL_DAYS
+
+
+def trial_end_date(payload: LicensePayload, today: date | None = None) -> str:
+    """试用结束日：日历到期与首次打开窗口取较早；当天仍可用。"""
+    if payload.kind != "trial":
+        return ""
+    clock = today or date.today()
+    expires = _parse_iso_date(payload.expires_at)
+    rec = _merge_trial_record(payload.instance_id) if payload.instance_id else {}
+    first = _parse_iso_date(rec.get("first_seen") or "") or clock
+    ends = first + timedelta(days=_trial_duration_days(payload))
+    if expires and expires < ends:
+        ends = expires
+    return ends.isoformat()
+
+
+def trial_clock_blocked(payload: LicensePayload, today: date | None = None) -> bool:
+    """试用：拨回系统日期、或超过首次打开后的窗口 → 结束。"""
+    if payload.kind != "trial":
+        return False
+    clock = today or date.today()
+    issued = _parse_iso_date(payload.issued_at)
+    if issued and clock < issued:
         return True
+    instance_id = (payload.instance_id or "").strip()
+    rec = _merge_trial_record(instance_id) if instance_id else {}
+    first = _parse_iso_date(rec.get("first_seen") or "")
+    last = _parse_iso_date(rec.get("last_seen") or "")
+    if last and clock < last:
+        return True
+    if first and clock < first:
+        return True
+    if first is None:
+        first = clock
+    last_seen = last if last and last > clock else clock
+    end = first + timedelta(days=_trial_duration_days(payload))
+    if clock > end:
+        return True
+    if instance_id:
+        _write_trial_record(instance_id, first.isoformat(), last_seen.isoformat())
+    return False
 
 
 def profile_ids(username: str = "") -> set[str]:
@@ -313,7 +474,9 @@ def evaluate(
     path: Path | None = None,
     public_pem: str | None = None,
     persist_bind: bool = True,
+    today: date | None = None,
 ) -> LicenseStatus:
+    clock = today or date.today()
     if development_mode() and path is None:
         return LicenseStatus(
             ok=True,
@@ -324,14 +487,24 @@ def evaluate(
         payload = load_payload(path, public_pem)
     except LicenseError as exc:
         return LicenseStatus(ok=False, mode="missing" if "未找到" in exc.message else "invalid", message=exc.message)
-    if _expired(payload.expires_at):
+    trial = payload.kind == "trial"
+    clock_blocked = trial_clock_blocked(payload, clock)
+    calendar_expired = _expired(payload.expires_at, clock)
+    trial_ends = trial_end_date(payload, clock)
+    extra = dict(
+        bind_mode=payload.bind_mode,
+        instance_id=payload.instance_id,
+        expires_at=payload.expires_at,
+        kind=payload.kind,
+        trial_ends_on=trial_ends,
+    )
+    if clock_blocked or calendar_expired:
         return LicenseStatus(
             ok=False,
             mode="expired",
             customer=payload.customer,
-            message="授权已过期，请联系实施人员续期",
-            bind_mode=payload.bind_mode,
-            instance_id=payload.instance_id,
+            message="试用已结束，付款后可继续使用" if trial else "授权已过期，请联系实施人员续期",
+            **extra,
         )
     bound = set(payload.identifiers())
     license_file = path or license_path()
@@ -348,8 +521,7 @@ def evaluate(
                 customer=payload.customer,
                 current_wxid=current_label,
                 message="请使用本机微信完成读取初始化，系统将绑定当前微信系统号",
-                bind_mode=payload.bind_mode,
-                instance_id=payload.instance_id,
+                **extra,
             )
         if persist_bind:
             write_bind(payload, sorted(current), public_pem, license_file=license_file)
@@ -359,9 +531,8 @@ def evaluate(
             customer=payload.customer,
             bound_wxids=sorted(current),
             current_wxid=current_label,
-            message="已绑定当前微信",
-            bind_mode=payload.bind_mode,
-            instance_id=payload.instance_id,
+            message="试用有效" if trial else "已绑定当前微信",
+            **extra,
         )
     if not current:
         return LicenseStatus(
@@ -370,8 +541,7 @@ def evaluate(
             customer=payload.customer,
             bound_wxids=sorted(bound),
             message="请登录授权的微信并完成读取初始化",
-            bind_mode=payload.bind_mode,
-            instance_id=payload.instance_id,
+            **extra,
         )
     if current & bound:
         return LicenseStatus(
@@ -380,9 +550,8 @@ def evaluate(
             customer=payload.customer,
             bound_wxids=sorted(bound),
             current_wxid=current_label,
-            message="授权有效",
-            bind_mode=payload.bind_mode,
-            instance_id=payload.instance_id,
+            message="试用有效" if trial else "授权有效",
+            **extra,
         )
     return LicenseStatus(
         ok=False,
@@ -391,8 +560,7 @@ def evaluate(
         bound_wxids=sorted(bound),
         current_wxid=current_label,
         message="本套软件已绑定其他微信，无法复制给其他人使用",
-        bind_mode=payload.bind_mode,
-        instance_id=payload.instance_id,
+        **extra,
     )
 
 

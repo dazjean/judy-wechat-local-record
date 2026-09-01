@@ -66,13 +66,17 @@ def _build_frontend() -> Path:
     return dist
 
 
-def _issue_license(customer: str, wxids: list[str], first_use: bool, expires: str, dest: Path) -> None:
+def _issue_license(
+    customer: str, wxids: list[str], first_use: bool, expires: str, dest: Path, trial_days: int = 0
+) -> None:
     cmd = [_py(), str(ROOT / "scripts" / "issue_license.py"), "--customer", customer, "--out", str(dest)]
     for wxid in wxids:
         cmd.extend(["--wxid", wxid])
     if first_use:
         cmd.append("--bind-on-first-use")
-    if expires:
+    if int(trial_days or 0) > 0:
+        cmd.extend(["--trial-days", str(int(trial_days))])
+    elif expires:
         cmd.extend(["--expires", expires])
     _run(cmd)
 
@@ -471,6 +475,12 @@ def main() -> int:
     parser.add_argument("--wxid", action="append", default=[], help="绑定的系统 wxid，可重复")
     parser.add_argument("--bind-on-first-use", action="store_true")
     parser.add_argument("--expires", default="")
+    parser.add_argument(
+        "--trial-days",
+        type=int,
+        default=0,
+        help="试用天数（>0 时签发试用授权，到期日=今天+N；转正把正式 license.dat 放到 Judy.app 同级即可）",
+    )
     parser.add_argument("--skip-nuitka", action="store_true", help="不编译业务模块（不可用于客户交付）")
     parser.add_argument("--skip-desktop", action="store_true", help="不构建 Judy.app（不可用于客户交付）")
     args = parser.parse_args()
@@ -493,7 +503,9 @@ def main() -> int:
     dest.mkdir(parents=True)
 
     license_path = dest / "license.dat"
-    _issue_license(args.customer, wxids, args.bind_on_first_use, args.expires, license_path)
+    _issue_license(
+        args.customer, wxids, args.bind_on_first_use, args.expires, license_path, args.trial_days
+    )
 
     _stage_backend(dest)
     _copy_tree(web, dest / "web")

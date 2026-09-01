@@ -13,7 +13,7 @@ sys.path.insert(0, str(BACKEND))
 
 from Crypto.PublicKey import ECC  # noqa: E402
 
-from app.license import issue_license  # noqa: E402
+from app.license import issue_license, trial_expires_on  # noqa: E402
 
 KEY_DIR = ROOT / "packaging" / "keys"
 PRIV_PATH = KEY_DIR / "ed25519.pem"
@@ -49,6 +49,12 @@ def main() -> int:
     parser.add_argument("--wxid", action="append", default=[], help="绑定的系统 wxid，可重复")
     parser.add_argument("--bind-on-first-use", action="store_true", help="首次识别到的微信即永久绑定")
     parser.add_argument("--expires", default="", help="到期日 YYYY-MM-DD，可空")
+    parser.add_argument(
+        "--trial-days",
+        type=int,
+        default=0,
+        help="试用天数（>0 时签发试用授权，到期日=今天+N，覆盖 --expires）",
+    )
     parser.add_argument("--out", default="", help="输出路径，默认 packaging/licenses/<customer>.dat")
     args = parser.parse_args()
     wxids = [x.strip() for x in args.wxid if x.strip()]
@@ -56,18 +62,26 @@ def main() -> int:
     if bind_mode == "wxid" and not wxids:
         print("必须用 --wxid 指定绑定的系统 wxid，或改用 --bind-on-first-use", file=sys.stderr)
         return 2
+    kind = "paid"
+    expires_at = args.expires
+    if int(args.trial_days or 0) > 0:
+        kind = "trial"
+        expires_at = trial_expires_on(args.trial_days)
     priv = _ensure_keys()
     text = issue_license(
         customer=args.customer,
         wxids=wxids,
         private_pem=priv,
         bind_mode=bind_mode,
-        expires_at=args.expires,
+        expires_at=expires_at,
+        kind=kind,
     )
     out = Path(args.out) if args.out else ROOT / "packaging" / "licenses" / f"{args.customer}.dat"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     print(f"已签发 {out}")
+    if kind == "trial":
+        print(f"试用授权，到期日 {expires_at}（当天仍可用）。转正：把正式 license.dat 放到 Judy.app 同级目录即可。")
     if bind_mode == "first_use":
         print("警告：未使用前的安装包仍可被复制后首次绑定。正式交付请尽量指定 --wxid。")
     return 0

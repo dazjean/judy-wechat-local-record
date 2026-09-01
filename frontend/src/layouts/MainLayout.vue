@@ -50,6 +50,7 @@
           正在查看历史微信号 {{ viewingLabel }}，同步仍写入当前登录号。
           <el-button link type="primary" @click="setViewing(null)">回到当前登录号</el-button>
         </span>
+        <span v-if="trialLabel" class="trial-pill" :class="{ urgent: trialUrgent }">{{ trialLabel }}</span>
       </el-header>
       <el-main class="main" :class="{ fill: isFillPage }">
         <router-view />
@@ -81,7 +82,13 @@ const range = ref(null);
 const filter = ref({ start_date: "", end_date: "" });
 const license = ref({ ok: true, mode: "development", message: "", customer: "" });
 const licenseBlock = computed(() => (license.value?.ok ? null : license.value));
-const overlayTitle = computed(() => (license.value?.mode === "offline" ? "本机服务未连接" : "未授权"));
+const overlayTitle = computed(() => {
+  if (license.value?.mode === "offline") return "本机服务未连接";
+  if (license.value?.mode === "expired") {
+    return license.value?.kind === "trial" ? "试用已结束" : "授权已过期";
+  }
+  return "未授权";
+});
 const reportScenes = ref([]);
 const accounts = ref([]);
 const viewingAccountId = ref(getViewingAccountId());
@@ -143,6 +150,70 @@ async function loadReportScenes() {
 
 let licenseRetry = 0;
 let licenseTimer = 0;
+const trialLabel = ref("");
+const trialUrgent = ref(false);
+let trialTimer = 0;
+let trialEndsAt = 0;
+
+function formatTrialRemain(ms) {
+  if (ms <= 0) return "试用已结束";
+  const total = Math.floor(ms / 1000);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const clock = `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  if (days > 0) return `试用剩余 ${days}天 ${clock}`;
+  return `试用剩余 ${clock}`;
+}
+
+function stopTrialCountdown() {
+  if (trialTimer) {
+    window.clearInterval(trialTimer);
+    trialTimer = 0;
+  }
+  trialEndsAt = 0;
+  trialLabel.value = "";
+  trialUrgent.value = false;
+}
+
+function tickTrialCountdown() {
+  if (!trialEndsAt) return;
+  const ms = trialEndsAt - Date.now();
+  trialLabel.value = formatTrialRemain(ms);
+  trialUrgent.value = ms > 0 && ms <= 3600000;
+  if (ms <= 0) {
+    stopTrialCountdown();
+    loadLicense();
+  }
+}
+
+function startTrialCountdown(isoDate) {
+  if (!isoDate) {
+    stopTrialCountdown();
+    return;
+  }
+  const next = new Date(`${isoDate}T23:59:59`).getTime();
+  if (trialEndsAt === next && trialTimer) {
+    tickTrialCountdown();
+    return;
+  }
+  trialEndsAt = next;
+  tickTrialCountdown();
+  if (!trialTimer) trialTimer = window.setInterval(tickTrialCountdown, 1000);
+}
+
+watch(
+  license,
+  (lic) => {
+    if (lic?.ok && lic.mode === "licensed" && lic.kind === "trial") {
+      startTrialCountdown(lic.trial_ends_on || lic.expires_at);
+    } else {
+      stopTrialCountdown();
+    }
+  },
+  { immediate: true }
+);
 
 function isNetworkFailure(err) {
   return Boolean(err?.network) || /network error/i.test(err?.message || "");
@@ -177,6 +248,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   if (licenseTimer) window.clearTimeout(licenseTimer);
+  stopTrialCountdown();
 });
 watch(
   () => route.path,
@@ -304,6 +376,21 @@ const rangeHint = computed(() => {
   gap: 12px;
   background: var(--bg);
   border-bottom: 1px solid var(--line);
+}
+.trial-pill {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn);
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.trial-pill.urgent {
+  color: #fff;
+  background: var(--warn);
+  border-color: var(--warn);
 }
 .main { background: var(--bg); }
 .main.fill { overflow: hidden; display: flex; flex-direction: column; }
