@@ -56,6 +56,21 @@ def contact_label(contact: Contact | None) -> str:
     return (contact.remark or contact.nickname or contact.peer_key or "").strip()
 
 
+def contact_subtitle(contact: Contact | None) -> str:
+    """副行：主标题未用到的昵称/备注，便于对照微信资料。"""
+    if not contact:
+        return ""
+    primary = contact_label(contact)
+    remark = (contact.remark or "").strip()
+    nickname = (contact.nickname or "").strip()
+    parts: list[str] = []
+    if nickname and nickname != primary:
+        parts.append(f"昵称 {nickname}")
+    if remark and remark != primary:
+        parts.append(f"备注 {remark}")
+    return " · ".join(parts)
+
+
 def is_review_noise(contact: Contact | None) -> bool:
     if not contact:
         return True
@@ -90,18 +105,34 @@ def _load_messages(db: Session, conv_id: int) -> list[Message]:
     )
 
 
+def _media_counts(msgs: list[Message]) -> tuple[int, int]:
+    images = 0
+    files = 0
+    for m in msgs:
+        t = (m.msg_type or "").lower()
+        body = (m.content or "").strip()
+        if t == "image" or body.startswith("[图片]"):
+            images += 1
+        elif t == "file" or body.startswith("[文件]"):
+            files += 1
+    return images, files
+
+
 def _flags_from_messages(msgs: list[Message], hit: bool) -> dict:
     _firsts, _avgs, timeouts = _response_stats(msgs, settings.timeout_seconds)
     missing_media = any(
         m.msg_type in {"image", "voice", "file"} and (m.media_status == "missing" or not m.media_relpath)
         for m in msgs
     )
+    image_count, file_count = _media_counts(msgs)
     return {
         "timeout": timeouts > 0,
         "timeout_count": timeouts,
         "forbidden": hit,
         "missing_media": missing_media,
         "official": looks_like_official_feed(msgs),
+        "image_count": image_count,
+        "file_count": file_count,
     }
 
 
@@ -119,10 +150,14 @@ def conversation_flags(db: Session, conv: Conversation) -> dict:
 def _item_from_flags(conv: Conversation, contact: Contact | None, flags: dict) -> dict:
     return {
         "id": conv.id,
+        "contact_id": conv.contact_id,
         "contact": contact_label(contact),
+        "contact_sub": contact_subtitle(contact),
         "started_at": conv.started_at.isoformat(),
         "last_msg_at": conv.last_msg_at.isoformat(),
         "msg_count": conv.msg_count,
+        "image_count": flags.get("image_count", 0),
+        "file_count": flags.get("file_count", 0),
         "timeout": flags["timeout"],
         "timeout_count": flags["timeout_count"],
         "forbidden": flags["forbidden"],
@@ -134,7 +169,104 @@ def _item_from_flags(conv: Conversation, contact: Contact | None, flags: dict) -
 def annotate_conversation(db: Session, conv: Conversation, contact: Contact | None = None) -> dict:
     contact = contact or db.get(Contact, conv.contact_id)
     flags = conversation_flags(db, conv)
-    return _item_from_flags(conv, contact, flags)
+    out = _item_from_flags(conv, contact, flags)
+    out["day"] = conv.last_msg_at.strftime("%Y-%m-%d")
+    return out
+
+
+def _build_daily_items_from_pairs(
+    db: Session,
+    pairs: list[tuple[Conversation, Contact]],
+    *,
+    start_date: str = "",
+    end_date: str = "",
+) -> list[dict]:
+    if not pairs:
+        return []
+    conv_ids = [conv.id for conv, _ in pairs]
+    contact_map = {contact.id: contact for _, contact in pairs}
+    msgs = (
+        db.query(Message)
+        .filter(Message.conversation_id.in_(conv_ids))
+        .order_by(Message.msg_time.asc())
+        .all()
+    )
+    hit_conv_ids = {
+        row[0]
+        for row in db.query(HitRecord.conversation_id)
+        .filter(HitRecord.conversation_id.in_(conv_ids), HitRecord.kind == "forbidden")
+        .distinct()
+        .all()
+    }
+    groups: dict[tuple[int, str], list[Message]] = defaultdict(list)
+    for m in msgs:
+        day = m.msg_time.strftime("%Y-%m-%d")
+        if start_date and day < start_date:
+            continue
+        if end_date and day > end_date:
+            continue
+        groups[(m.contact_id, day)].append(m)
+    items: list[dict] = []
+    for (contact_id, day), day_msgs in groups.items():
+        contact = contact_map.get(contact_id)
+        if not contact or is_review_noise(contact):
+            continue
+        day_conv_ids = {m.conversation_id for m in day_msgs}
+        hit = any(cid in hit_conv_ids for cid in day_conv_ids)
+        flags = _flags_from_messages(day_msgs, hit)
+        if flags["official"]:
+            continue
+        started = min(m.msg_time for m in day_msgs)
+        ended = max(m.msg_time for m in day_msgs)
+        items.append(
+            {
+                "id": f"{contact_id}:{day}",
+                "contact_id": contact_id,
+                "day": day,
+                "contact": contact_label(contact),
+                "contact_sub": contact_subtitle(contact),
+                "started_at": started.isoformat(),
+                "last_msg_at": ended.isoformat(),
+                "msg_count": len(day_msgs),
+                "image_count": flags["image_count"],
+                "file_count": flags["file_count"],
+                "segment_count": len(day_conv_ids),
+                "conversation_id": day_msgs[-1].conversation_id,
+                "timeout": flags["timeout"],
+                "timeout_count": flags["timeout_count"],
+                "forbidden": flags["forbidden"],
+                "missing_media": flags["missing_media"],
+                "noise": False,
+            }
+        )
+    items.sort(key=lambda x: x["last_msg_at"], reverse=True)
+    return items
+
+
+def list_daily_messages(
+    db: Session,
+    *,
+    contact_id: int,
+    day: str,
+    account_id: int,
+) -> list[Message] | None:
+    contact = db.get(Contact, contact_id)
+    if not contact or contact.account_id != account_id or is_review_noise(contact):
+        return None
+    day = (day or "").strip()[:10]
+    if len(day) != 10:
+        return None
+    return (
+        db.query(Message)
+        .filter(
+            Message.contact_id == contact_id,
+            Message.account_id == account_id,
+            Message.msg_time >= f"{day} 00:00:00",
+            Message.msg_time <= f"{day} 23:59:59",
+        )
+        .order_by(Message.msg_time.asc())
+        .all()
+    )
 
 
 def last_sync_info(db: Session) -> dict | None:
@@ -281,16 +413,13 @@ def list_review_page(
         apply_filters=True,
         max_convs=max_convs,
     )
+    items = _build_daily_items_from_pairs(db, pairs, start_date=start_date, end_date=end_date)
+    if flag:
+        items = [item for item in items if _flag_match(item, flag)]
     page = max(1, page)
     page_size = max(1, page_size)
     start = (page - 1) * page_size
-    if flag:
-        items = [item for item in _annotate_many(db, pairs) if not item["noise"] and _flag_match(item, flag)]
-        return items[start : start + page_size], len(items)
-    extra = min(40, page_size)
-    window = pairs[start : start + page_size + extra]
-    items = [item for item in _annotate_chunk(db, window) if not item["noise"]][:page_size]
-    return items, len(pairs)
+    return items[start : start + page_size], len(items)
 
 
 def list_review_items(
@@ -313,7 +442,12 @@ def list_review_items(
         apply_filters=apply_filters,
         max_convs=max_convs,
     )
-    items = [item for item in _annotate_many(db, pairs) if not item["noise"]]
+    items = _build_daily_items_from_pairs(
+        db,
+        pairs,
+        start_date=start_date if apply_filters else "",
+        end_date=end_date if apply_filters else "",
+    )
     if apply_filters and flag:
         items = [item for item in items if _flag_match(item, flag)]
     return items
@@ -361,7 +495,7 @@ def export_filename(
             parts.append(f"至{end_date}")
         needle = (q or "").strip()
         if needle:
-            parts.append(f"客户{needle}")
+            parts.append(f"好友{needle}")
         if flag in FLAG_LABELS:
             parts.append(FLAG_LABELS[flag])
         if len(parts) == 2:

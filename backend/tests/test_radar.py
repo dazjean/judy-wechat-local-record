@@ -66,10 +66,10 @@ def test_sort_risk_before_quiet():
     assert sort_key(risk) < sort_key(quiet)
 
 
-def test_detect_role_teacher_before_parent():
-    assert detect_role(["我们学校的孩子也要用"]) == "老师"
-    assert detect_role(["孩子作业跟不上"]) == "家长"
-    assert detect_role(["我自己学一套"]) == "学员"
+def test_detect_role_org_before_family():
+    assert detect_role(["我们学校的孩子也要用"]) == "机构"
+    assert detect_role(["孩子作业跟不上"]) == "家庭"
+    assert detect_role(["我自己学一套"]) == "个人"
 
 
 def test_quoted_silent_after_price_or_file():

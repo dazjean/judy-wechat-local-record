@@ -80,6 +80,7 @@ export const api = {
   conversations: (params) => http.get("/conversations", { params }).then((r) => r.data),
   conversation: (id) => http.get(`/conversations/${id}`).then((r) => r.data),
   messages: (id) => http.get(`/conversations/${id}/messages`).then((r) => r.data),
+  dailyMessages: (params) => http.get("/conversations/daily/messages", { params }).then((r) => r.data),
   exportXlsx: (params) =>
     http.post("/exports", null, { params, responseType: "blob" }).then((r) => ({
       blob: r.data,

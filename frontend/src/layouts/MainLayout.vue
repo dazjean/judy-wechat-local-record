@@ -12,7 +12,7 @@
         :default-active="activeMenu"
         :default-openeds="defaultOpeneds"
       >
-        <el-menu-item index="/">客户雷达</el-menu-item>
+        <el-menu-item index="/">好友雷达</el-menu-item>
         <el-menu-item index="/sync">微信同步</el-menu-item>
         <el-menu-item index="/conversations">会话明细</el-menu-item>
         <el-menu-item index="/metrics">效率统计</el-menu-item>

@@ -99,7 +99,7 @@
         <div class="kpi">
           <div class="k-label"><i class="dot"></i>可统计回复</div>
           <div class="k-num">{{ stats.reply_count || 0 }}<small>次</small></div>
-          <div class="k-sub">超时未回应看客户雷达</div>
+          <div class="k-sub">超时未回应看好友雷达</div>
         </div>
       </div>
     </section>

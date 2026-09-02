@@ -49,6 +49,7 @@ from app.engine.review import (
     format_clock,
     format_seconds,
     last_sync_info,
+    list_daily_messages,
     list_review_items,
     list_review_page,
     timeout_items,
@@ -811,6 +812,37 @@ def customer_radar(
     return list_radar(db, start_date=start_date, end_date=end_date, status=status, account_id=scoped)
 
 
+@router.get("/conversations/daily/messages")
+def daily_conv_messages(
+    contact_id: int = Query(..., ge=1),
+    day: str = Query(..., min_length=10, max_length=10),
+    db: Session = Depends(get_db),
+    account_id: int | None = None,
+):
+    scoped = _scope_id(db, account_id)
+    if scoped is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    rows = list_daily_messages(db, contact_id=contact_id, day=day, account_id=scoped)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return [
+        {
+            "id": m.id,
+            "msg_time": m.msg_time.isoformat(),
+            "sender_role": m.sender_role,
+            "sender_name": m.sender_name,
+            "speaker": _message_speaker(db, m),
+            "msg_type": m.msg_type,
+            "content": m.content,
+            "media_name": m.media_name,
+            "media_mime": m.media_mime,
+            "media_status": m.media_status,
+            "has_media": bool(m.media_relpath),
+        }
+        for m in rows
+    ]
+
+
 @router.get("/conversations/{conv_id}")
 def get_conversation(conv_id: int, db: Session = Depends(get_db), account_id: int | None = None):
     conv = db.get(Conversation, conv_id)
@@ -949,23 +981,33 @@ def export_messages(
         apply_filters=apply_filters,
         max_convs=5000 if scope == "all" else 400,
     )
-    by_id = {item["id"]: item for item in items}
-    conv_ids = list(by_id)
+    by_key = {item["id"]: item for item in items}
     rows = []
-    if conv_ids:
-        rows = (
+    for item in items:
+        day = item.get("day") or ""
+        contact_id = item.get("contact_id")
+        if not day or not contact_id:
+            continue
+        chunk = (
             db.query(Message)
-            .filter(Message.conversation_id.in_(conv_ids))
+            .filter(
+                Message.contact_id == contact_id,
+                Message.msg_time >= f"{day} 00:00:00",
+                Message.msg_time <= f"{day} 23:59:59",
+            )
             .order_by(Message.msg_time.asc())
-            .limit(20000)
             .all()
         )
+        rows.extend(chunk)
+    if len(rows) > 20000:
+        rows = rows[:20000]
     wb = Workbook()
     ws = wb.active
     ws.title = "messages"
     ws.append(["对方", "时间", "昵称", "发送者", "类型", "内容", "标记"])
     for m in rows:
-        item = by_id.get(m.conversation_id) or {}
+        day = m.msg_time.strftime("%Y-%m-%d")
+        item = by_key.get(f"{m.contact_id}:{day}") or {}
         ws.append(
             [
                 item.get("contact") or "",

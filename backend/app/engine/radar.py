@@ -1,4 +1,4 @@
-"""客户雷达：按联系人看状态、诉求、风险，点进对应会话。"""
+"""好友雷达：按联系人看状态、诉求、风险，点进对应会话。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.engine.review import contact_is_official, contact_label
+from app.engine.review import contact_is_official, contact_label, contact_subtitle
 from app.models import Contact, Conversation, HitRecord, Message
 
 QUIET_DAYS = 7
@@ -24,9 +24,9 @@ INTENT_RULES = (
 RISK_TERMS = ("退费", "退款", "投诉", "举报", "律师", "工商", "差评", "骗子", "假的", "报警")
 PROMISE_TERMS = ("明天", "稍后", "回头给你", "帮你问", "帮你申请", "给你方案", "跟进一下", "确认后", "回复你")
 ROLE_RULES = (
-    ("老师", ("我们学校", "校长", "班级", "校本", "教研", "同事")),
-    ("家长", ("孩子", "小孩", "家长", "作业", "我家娃", "我家")),
-    ("学员", ("我自己学", "我报名", "我来上课")),
+    ("机构", ("我们学校", "校长", "班级", "校本", "教研", "同事", "公司", "单位", "部门")),
+    ("家庭", ("孩子", "小孩", "家长", "作业", "我家娃", "我家", "家人", "老公", "老婆")),
+    ("个人", ("我自己", "我报名", "我来上课", "个人用", "我自己学")),
 )
 QUOTE_TERMS = ("报价", "价格", "优惠", "多少钱", "费用", "课时包", "方案")
 MATERIAL_TYPES = ("link", "file")
@@ -265,6 +265,9 @@ def list_radar(
                 "contact_id": contact.id,
                 "conversation_id": latest.id,
                 "contact": contact_label(contact),
+                "contact_sub": contact_subtitle(contact),
+                "nickname": (contact.nickname or "").strip(),
+                "remark": (contact.remark or "").strip(),
                 "status": status_code,
                 "status_label": STATUS_LABEL[status_code],
                 "intent": intent or "—",

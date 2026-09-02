@@ -50,7 +50,7 @@
       <el-form-item label="超时阈值(秒)">
         <div>
           <el-input-number v-model="form.timeout_seconds" :min="30" :max="3600" />
-          <p class="hint block">对方发来消息后，超过这个秒数还没回复，客户雷达会标超时，效率统计也会计入超时次数。默认 180 秒。</p>
+          <p class="hint block">对方发来消息后，超过这个秒数还没回复，好友雷达会标超时，效率统计也会计入超时次数。默认 180 秒。</p>
         </div>
       </el-form-item>
       <el-form-item label="会话间隔(小时)">
