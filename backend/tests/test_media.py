@@ -106,3 +106,61 @@ def test_find_downloaded_file_by_name(tmp_path, monkeypatch):
         NativeMedia(kind="file", create_time=ts, local_id=1, file_name="作业.pdf")
     )
     assert hit == target
+
+
+def test_take_opened_preview_prefers_closest_after_message(tmp_path):
+    from app.ingest.media import extract as media_extract
+
+    temp = tmp_path / "temp" / "RWTemp" / "2026-09"
+    temp.mkdir(parents=True)
+    early = temp / "early.jpg"
+    late = temp / "late.jpg"
+    early.write_bytes(b"\xff\xd8\xff" + b"\x00" * 128)
+    late.write_bytes(b"\xff\xd8\xff" + b"\x00" * 256)
+    create_time = 1_000_000
+    import os
+
+    os.utime(early, (create_time + 500, create_time + 500))
+    os.utime(late, (create_time + 1500, create_time + 1500))
+    pool = media_extract.build_opened_image_pool(tmp_path)
+    used: set[Path] = set()
+    hit = media_extract.take_opened_preview(pool, used, create_time)
+    assert hit == early
+    hit2 = media_extract.take_opened_preview(pool, used, create_time + 10)
+    assert hit2 == late
+
+
+def test_best_dat_prefers_size_and_mtime_over_stale_hd(tmp_path):
+    from app.ingest.media import extract as media_extract
+
+    img_dir = tmp_path / "Img"
+    img_dir.mkdir()
+    create_time = 1_000_000
+    xml_length = 35590
+    good = img_dir / "28fb9012f836bfdf57ba4ff32bc1edad.dat"
+    stale_hd = img_dir / "77e5e5ee4adc2e59aae8d767ead09960_h.dat"
+    good.write_bytes(b"x" * (xml_length + media_extract._DAT_HEADER))
+    stale_hd.write_bytes(b"x" * 637531)
+    good.touch()
+    stale_hd.touch()
+    import os
+
+    os.utime(good, (create_time + 1, create_time + 1))
+    os.utime(stale_hd, (create_time + 55_000, create_time + 55_000))
+    hit = media_extract._best_dat(img_dir, "", create_time, xml_length)
+    assert hit == good
+
+
+def test_parse_local_id_and_resolve_native():
+    from app.ingest.media.msg_index import NativeMedia, parse_local_id, resolve_native
+
+    assert parse_local_id("[图片] (local_id=36732)") == 36732
+    assert parse_local_id("[图片]") == 0
+    rows = [
+        NativeMedia(kind="image", create_time=100, local_id=1, xml_length=1000),
+        NativeMedia(kind="image", create_time=200, local_id=36732, xml_length=35590),
+    ]
+    at = datetime.fromtimestamp(100)
+    hit = resolve_native(rows, "image", at, local_id=36732)
+    assert hit is not None
+    assert hit.local_id == 36732

@@ -32,10 +32,20 @@
             class="conv-table"
             @row-click="onRowClick"
           >
-          <el-table-column label="好友" min-width="110">
+          <el-table-column label="好友" min-width="140">
             <template #default="{ row }">
-              <div>{{ row.contact }}</div>
-              <div v-if="row.contact_sub" class="sub">{{ row.contact_sub }}</div>
+              <div class="friend-cell">
+                <ContactAvatar
+                  :contact-id="row.contact_id"
+                  :name="row.contact"
+                  :has-avatar="row.has_avatar"
+                  :size="28"
+                />
+                <div class="friend-text">
+                  <div>{{ row.contact }}</div>
+                  <div v-if="row.contact_sub" class="sub">{{ row.contact_sub }}</div>
+                </div>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="日期" min-width="108" class-name="col-date">
@@ -175,6 +185,7 @@ import { useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import { api } from "../api";
 import { formatTime, formatDate, toIsoDate } from "../formatTime";
+import ContactAvatar from "../components/ContactAvatar.vue";
 
 const filter = inject("filter");
 const route = useRoute();
@@ -542,6 +553,8 @@ watch(
 .meta { margin-bottom: 4px; }
 .t { color: var(--muted); margin-left: 8px; font-size: 12px; }
 .sub { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.35; word-break: break-word; }
+.friend-cell { display: flex; align-items: center; gap: 8px; }
+.friend-text { min-width: 0; }
 .sub.inline { display: inline; margin-top: 0; margin-left: 8px; }
 .warn-head { cursor: help; border-bottom: 1px dashed var(--muted); }
 .body { white-space: pre-wrap; word-break: break-word; }

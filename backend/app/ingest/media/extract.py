@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Optional
 
 from app.ingest.media.dat_decrypt import decrypt_dat
-from app.ingest.media.msg_index import NativeMedia, load_native_media, load_voice_blob, take_native
+from app.ingest.media.msg_index import (
+    NativeMedia,
+    load_native_media,
+    load_voice_blob,
+    parse_local_id,
+    resolve_native,
+)
 from app.ingest.media.silk_mp3 import silk_to_mp3
 from app.ingest.media.store import save_bytes, save_file
 from app.ingest.media.wx_paths import wechat_account_root
@@ -29,28 +35,91 @@ def _is_preview_image(path: Path) -> bool:
     return head.startswith(b"\xff\xd8\xff") or head.startswith(b"\x89PNG") or head.startswith(b"GIF8")
 
 
-def _best_dat(img_dir: Path, xml_md5: str, create_time: int) -> Optional[Path]:
+def _best_dat(img_dir: Path, xml_md5: str, create_time: int, xml_length: int = 0) -> Optional[Path]:
     if not img_dir.is_dir():
         return None
     files = [p for p in img_dir.glob("*.dat") if p.is_file() and not p.name.endswith("_t.dat")]
     if not files:
         return None
-    ranked: list[tuple[int, int, Path]] = []
+    ranked: list[tuple[int, int, int, Path]] = []
     for path in files:
         name = path.name
-        if xml_md5 and xml_md5 in name:
-            rank = 30 if name.endswith("_h.dat") else 20
-        elif name.endswith("_h.dat"):
-            rank = 3
-        else:
-            rank = 2
         try:
-            delta = abs(int(path.stat().st_mtime) - create_time)
+            st = path.stat()
+            delta = abs(int(st.st_mtime) - create_time)
+            plain = max(st.st_size - _DAT_HEADER, 0)
         except OSError:
             delta = 10**9
-        ranked.append((rank, -delta, path))
-    ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return ranked[0][2] if ranked else None
+            plain = 0
+        tier = 0
+        if xml_md5 and xml_md5 in name:
+            tier = 40 if name.endswith("_h.dat") else 35
+        elif xml_length and abs(plain - xml_length) <= 1:
+            tier = 30
+        elif delta <= 120:
+            tier = 20 if not name.endswith("_h.dat") else 10
+        elif name.endswith("_h.dat"):
+            tier = 3
+        else:
+            tier = 2
+        size_penalty = abs(plain - xml_length) if xml_length else 0
+        ranked.append((tier, -delta, -size_penalty, path))
+    ranked.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    return ranked[0][3] if ranked else None
+
+
+def build_opened_image_pool(root: Path) -> list[tuple[int, Path]]:
+    """新版 macOS 微信把点开后的原图写到 temp/RWTemp，体积常与 XML length 不一致。"""
+    pool: list[tuple[int, Path]] = []
+    base = root / "temp"
+    if not base.is_dir():
+        return pool
+    scan_roots: list[Path] = []
+    for name in ("RWTemp", "InputTemp", "inputtemp", "ImageTemp"):
+        path = base / name
+        if path.is_dir():
+            scan_roots.append(path)
+    if not scan_roots:
+        return pool
+    for scan_root in scan_roots:
+        for path in scan_root.rglob("*"):
+            if not path.is_file() or not _is_preview_image(path):
+                continue
+            try:
+                mtime = int(path.stat().st_mtime)
+            except OSError:
+                continue
+            pool.append((mtime, path))
+    pool.sort(key=lambda row: row[0])
+    return pool
+
+
+def take_opened_preview(
+    pool: list[tuple[int, Path]],
+    used: set[Path],
+    create_time: int,
+    dat: Optional[Path] = None,
+    *,
+    max_after: int = 86400 * 7,
+    max_before: int = 300,
+) -> Optional[Path]:
+    dat_stem = dat.stem.replace("_h", "").replace("_t", "") if dat else ""
+    best: Optional[tuple[int, Path]] = None
+    for mtime, path in pool:
+        if path in used:
+            continue
+        offset = mtime - create_time
+        if offset < -max_before or offset > max_after:
+            continue
+        score = abs(offset)
+        if dat_stem and dat_stem in path.name:
+            score -= 1_000_000
+        if best is None or score < best[0]:
+            best = (score, path)
+    if best is None:
+        return None
+    used.add(best[1])
+    return best[1]
 
 
 def build_preview_index(root: Path) -> dict[int, list[Path]]:
@@ -98,7 +167,7 @@ def _find_image_bytes(
         return None
     month = datetime.fromtimestamp(native.create_time).strftime("%Y-%m")
     img_dir = root / "msg" / "attach" / _chat_hash(wxid) / month / "Img"
-    dat = _best_dat(img_dir, native.xml_md5, native.create_time)
+    dat = _best_dat(img_dir, native.xml_md5, native.create_time, native.xml_length)
     sizes: list[int] = []
     if native.xml_length:
         sizes.append(native.xml_length)
@@ -163,10 +232,18 @@ def attach_media(items: list[ParsedMessage], peer_key: str) -> dict[str, int]:
     natives = load_native_media(peer_key)
     root = wechat_account_root()
     preview_index = build_preview_index(root) if root else {}
+    opened_pool = build_opened_image_pool(root) if root else []
+    used_opened: set[Path] = set()
+    pending_images: list[tuple[ParsedMessage, NativeMedia]] = []
     for item in items:
         if item.msg_type not in {"image", "voice", "file"}:
             continue
-        native = take_native(natives, item.msg_type, item.msg_time)
+        native = resolve_native(
+            natives,
+            item.msg_type,
+            item.msg_time,
+            local_id=parse_local_id(item.content),
+        )
         if native is None:
             native = NativeMedia(
                 kind=item.msg_type,
@@ -182,6 +259,9 @@ def attach_media(items: list[ParsedMessage], peer_key: str) -> dict[str, int]:
                     data, src_name = found
                     rel, mime, name = save_bytes("image", data, src_name)
                     status = "ready"
+                else:
+                    pending_images.append((item, native))
+                    continue
             elif item.msg_type == "file":
                 if not native.file_name and item.content.startswith("[文件]"):
                     native.file_name = item.content[4:].strip()
@@ -209,6 +289,32 @@ def attach_media(items: list[ParsedMessage], peer_key: str) -> dict[str, int]:
             item.media_mime = mime
             item.media_status = status
             stats[item.msg_type] += 1
+        else:
+            item.media_status = "missing"
+            stats["missing"] += 1
+
+    pending_images.sort(key=lambda pair: pair[1].create_time, reverse=True)
+    for item, native in pending_images:
+        rel = name = mime = status = ""
+        try:
+            if root:
+                month = datetime.fromtimestamp(native.create_time).strftime("%Y-%m")
+                img_dir = root / "msg" / "attach" / _chat_hash(peer_key) / month / "Img"
+                dat = _best_dat(img_dir, native.xml_md5, native.create_time, native.xml_length)
+                preview = take_opened_preview(opened_pool, used_opened, native.create_time, dat)
+                if preview:
+                    data = preview.read_bytes()
+                    rel, mime, name = save_bytes("image", data, preview.name)
+                    status = "ready"
+        except OSError:
+            rel = ""
+            status = ""
+        if rel:
+            item.media_relpath = rel
+            item.media_name = name
+            item.media_mime = mime
+            item.media_status = status
+            stats["image"] += 1
         else:
             item.media_status = "missing"
             stats["missing"] += 1

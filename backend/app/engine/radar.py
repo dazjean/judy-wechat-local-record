@@ -266,6 +266,7 @@ def list_radar(
                 "conversation_id": latest.id,
                 "contact": contact_label(contact),
                 "contact_sub": contact_subtitle(contact),
+                "has_avatar": bool((contact.avatar_relpath or "").strip()),
                 "nickname": (contact.nickname or "").strip(),
                 "remark": (contact.remark or "").strip(),
                 "status": status_code,

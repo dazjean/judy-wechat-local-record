@@ -55,7 +55,15 @@ from app.engine.review import (
     timeout_items,
 )
 from app.engine.speakers import PLACEHOLDER_SELF, speaker_label
-from app.ingest.auto_sync import auto_sync_status, clamp_minutes, current_sync_job, enqueue_sync, sync_busy
+from app.ingest.auto_sync import (
+    auto_sync_status,
+    clamp_minutes,
+    current_sync_job,
+    enqueue_media_backfill,
+    enqueue_sync,
+    sync_busy,
+)
+from app.ingest.media.backfill import count_missing_media
 from app.ingest.media import clear_media_dir, resolve_media_path
 from app.ingest.media.self_account import (
     SelfProfile,
@@ -170,6 +178,11 @@ class SyncIn(BaseModel):
     include_names: str = ""
     limit_people_enabled: bool = True
     limit_people: int = Field(default=20, ge=1, le=300)
+
+
+class MediaBackfillIn(BaseModel):
+    include_names: str = ""
+    exclude_names: str = ""
 
 
 class AnalysisIn(BaseModel):
@@ -570,6 +583,7 @@ def wechat_status(db: Session = Depends(get_db)):
     status["auto_sync"] = auto_sync_status(db)
     status["sync_job_id"] = job.id if job else ""
     status["sync_job_status"] = job.status if job else ""
+    status["missing_media_count"] = count_missing_media(db, account.id) if account else 0
     return status
 
 
@@ -708,8 +722,10 @@ def _persist_sync_scope(db: Session, body: SyncIn) -> None:
 
 
 def _sync_job_item(job: SyncJob) -> dict:
+    kind = getattr(job, "job_kind", None) or "sync"
     return {
         "id": job.id,
+        "kind": kind,
         "status": job.status,
         "start_date": job.start_date or "",
         "total_contacts": job.total_contacts,
@@ -741,6 +757,34 @@ def start_sync(body: SyncIn, db: Session = Depends(get_db)):
         raise HTTPException(409, "已有同步任务在进行，请稍后再试")
     return {
         "id": job.id,
+        "status": job.status,
+        "total_contacts": 0,
+        "ok_contacts": 0,
+        "written": 0,
+        "skipped": 0,
+        "error_message": "",
+        "log": "",
+    }
+
+
+@router.post("/wechat/sync/media-backfill")
+def start_media_backfill(body: MediaBackfillIn, db: Session = Depends(get_db)):
+    if sync_busy(db):
+        raise HTTPException(409, "已有同步任务在进行，请稍后再试")
+    try:
+        job = enqueue_media_backfill(
+            db,
+            include_names=body.include_names,
+            exclude_names=body.exclude_names,
+            reason="手动补拉媒体开始",
+        )
+    except MissingWxid as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not job:
+        raise HTTPException(409, "已有同步任务在进行，请稍后再试")
+    return {
+        "id": job.id,
+        "kind": job.job_kind,
         "status": job.status,
         "total_contacts": 0,
         "ok_contacts": 0,
@@ -880,6 +924,24 @@ def conv_messages(conv_id: int, db: Session = Depends(get_db), account_id: int |
         }
         for m in rows
     ]
+
+
+@router.get("/contacts/{contact_id}/avatar")
+def contact_avatar(contact_id: int, db: Session = Depends(get_db)):
+    contact = db.get(Contact, contact_id)
+    if not contact or not contact.avatar_relpath:
+        raise HTTPException(status_code=404, detail="没有头像")
+    path = resolve_media_path(contact.avatar_relpath)
+    if not path:
+        raise HTTPException(status_code=404, detail="头像不在本地")
+    head = path.read_bytes()[:16]
+    if head.startswith(b"\x89PNG"):
+        mime = "image/png"
+    elif head.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    else:
+        mime = "image/jpeg"
+    return FileResponse(path, media_type=mime, content_disposition_type="inline")
 
 
 @router.get("/messages/{msg_id}/media")

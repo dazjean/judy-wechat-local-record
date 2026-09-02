@@ -73,6 +73,7 @@ export const api = {
   accounts: () => http.get("/accounts").then((r) => r.data),
   readerStatus: () => http.get("/wechat/status").then((r) => r.data),
   startSync: (body) => http.post("/wechat/sync", body).then((r) => r.data),
+  startMediaBackfill: (body) => http.post("/wechat/sync/media-backfill", body).then((r) => r.data),
   syncJobs: () => http.get("/wechat/sync", { params: { t: Date.now() } }).then((r) => r.data),
   resetData: () => http.post("/data/reset").then((r) => r.data),
   syncJob: (id) =>
@@ -104,3 +105,7 @@ export const api = {
   group: (id, params) => http.get(`/groups/${id}`, { params }).then((r) => r.data),
   patchGroupMember: (id, body) => http.patch(`/groups/${id}/members`, body).then((r) => r.data),
 };
+
+export function contactAvatarUrl(contactId) {
+  return `/api/contacts/${contactId}/avatar?t=${Date.now()}`;
+}

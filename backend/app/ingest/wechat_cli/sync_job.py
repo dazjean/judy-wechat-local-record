@@ -607,8 +607,10 @@ def run_sync_job(
         scanned = False
         synced_person = False
         synced_group = False
+        synced_peer_keys: list[str] = []
         for key, display in usable:
             scanned = True
+            synced_peer_keys.append(key)
             existing = (
                 db.query(Contact)
                 .filter_by(account_id=account.id, peer_key=key)
@@ -694,6 +696,13 @@ def run_sync_job(
                     log(f"已更新效率统计，命中 {scan.get('hits', 0)} 条")
                 except Exception:
                     log("效率统计未更新，可在效率页点重新统计")
+            if synced_peer_keys:
+                try:
+                    from app.ingest.media.avatars import sync_contact_avatars
+
+                    sync_contact_avatars(db, account.id, peer_keys=synced_peer_keys, log=log)
+                except Exception:
+                    log("头像未更新，可在下次同步时重试")
         db.commit()
     except ReaderError as exc:
         db.rollback()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import tempfile
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _zstd = zstd.ZstdDecompressor() if zstd else None
+LOCAL_ID_RE = re.compile(r"\(local_id=(\d+)\)")
 
 
 @dataclass
@@ -188,6 +190,39 @@ def load_native_media(wxid: str) -> list[NativeMedia]:
     except sqlite3.Error:
         return []
     return rows
+
+
+def parse_local_id(content: str) -> int:
+    match = LOCAL_ID_RE.search(content or "")
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return 0
+
+
+def take_native_by_local_id(rows: list[NativeMedia], kind: str, local_id: int) -> Optional[NativeMedia]:
+    if local_id <= 0:
+        return None
+    for row in rows:
+        if not row.used and row.kind == kind and row.local_id == local_id:
+            row.used = True
+            return row
+    return None
+
+
+def resolve_native(
+    rows: list[NativeMedia],
+    kind: str,
+    msg_time: datetime,
+    *,
+    local_id: int = 0,
+) -> Optional[NativeMedia]:
+    hit = take_native_by_local_id(rows, kind, local_id)
+    if hit is not None:
+        return hit
+    return take_native(rows, kind, msg_time)
 
 
 def take_native(rows: list[NativeMedia], kind: str, msg_time: datetime) -> Optional[NativeMedia]:

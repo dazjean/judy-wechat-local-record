@@ -33,6 +33,8 @@ class Contact(Base):
     peer_key: Mapped[str] = mapped_column(String(128), index=True)
     nickname: Mapped[str] = mapped_column(String(256), default="")
     remark: Mapped[str] = mapped_column(String(256), default="")
+    avatar_relpath: Mapped[str] = mapped_column(String(512), default="")
+    avatar_md5: Mapped[str] = mapped_column(String(64), default="")
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     account: Mapped[Account] = relationship(back_populates="contacts")
@@ -84,6 +86,7 @@ class SyncJob(Base):
     written: Mapped[int] = mapped_column(Integer, default=0)
     skipped: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
+    job_kind: Mapped[str] = mapped_column(String(32), default="sync", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 

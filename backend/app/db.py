@@ -65,6 +65,9 @@ def init_db() -> None:
     _add_column_if_missing("analysis_jobs", "contact_id", "INTEGER")
     _add_column_if_missing("analysis_jobs", "report_type", "TEXT DEFAULT 'portrait'")
     _add_column_if_missing("sync_jobs", "account_id", "INTEGER")
+    _add_column_if_missing("sync_jobs", "job_kind", "TEXT DEFAULT 'sync'")
+    _add_column_if_missing("contacts", "avatar_relpath", "TEXT DEFAULT ''")
+    _add_column_if_missing("contacts", "avatar_md5", "TEXT DEFAULT ''")
     _ensure_message_account_hash_index()
     from app.analyze.prompt_store import seed_default_prompts
     from app.accounts import current_account_key, migrate_local_accounts

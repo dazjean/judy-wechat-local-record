@@ -88,7 +88,7 @@
       <template #header>
         <div class="card-head">
           <span>同步进度</span>
-          <span class="head-meta" v-if="job">{{ statusLabel }} ｜ 会话 {{ job.ok_contacts || 0 }}/{{ job.total_contacts || 0 }} ｜ 写入 {{ job.written || 0 }}</span>
+          <span class="head-meta" v-if="job">{{ statusLabel }} ｜ {{ jobKindLabel }} ｜ 会话 {{ job.ok_contacts || 0 }}/{{ job.total_contacts || 0 }} ｜ {{ jobMetricLabel }} {{ job.written || 0 }}</span>
           <span class="head-meta" v-else>开始同步后进度和日志会显示在这里</span>
         </div>
       </template>
@@ -165,7 +165,13 @@
               <p class="hint field-hint">群更活跃，单独调高即可。调大后下次同步会按最近天数补更早的记录。</p>
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" :loading="loading" :disabled="busy" @click="start">开始同步</el-button>
+              <div class="sync-actions">
+                <el-button type="primary" :loading="loading" :disabled="busy" @click="start">开始同步</el-button>
+                <el-button :loading="backfillLoading" :disabled="busy" @click="startMediaBackfill">补拉媒体</el-button>
+              </div>
+              <p v-if="status.missing_media_count" class="hint field-hint">
+                当前有 {{ status.missing_media_count }} 条缺原文件。请先在微信里点开原图或下载附件，再点「补拉媒体」。
+              </p>
             </el-form-item>
           </el-form>
           <p class="hint">默认只同步个人聊天。已同步过的人只拉上次成功之后的新消息；把天数或个人/群聊条数调大时会补更早的记录。</p>
@@ -213,6 +219,9 @@
           <el-table-column label="时间" min-width="168">
             <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
           </el-table-column>
+          <el-table-column label="类型" width="88">
+            <template #default="{ row }">{{ jobKindText(row.kind) }}</template>
+          </el-table-column>
           <el-table-column label="状态" width="88">
             <template #default="{ row }">
               <el-tag :type="jobTag(row.status)" size="small">{{ jobLabel(row.status) }}</el-tag>
@@ -221,7 +230,9 @@
           <el-table-column label="会话" width="88">
             <template #default="{ row }">{{ row.ok_contacts || 0 }}/{{ row.total_contacts || 0 }}</template>
           </el-table-column>
-          <el-table-column label="写入" width="72" prop="written" />
+          <el-table-column label="写入" width="72">
+            <template #default="{ row }">{{ row.kind === "media_backfill" ? row.written || 0 : row.written }}</template>
+          </el-table-column>
           <el-table-column label="操作" width="88" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openHistory(row)">查看</el-button>
@@ -233,8 +244,8 @@
 
     <el-drawer v-model="historyOpen" :title="historyTitle" size="520px" destroy-on-close>
       <p class="meta" v-if="historyJob">
-        {{ jobLabel(historyJob.status) }} ｜ 会话 {{ historyJob.ok_contacts || 0 }}/{{ historyJob.total_contacts || 0 }} ｜
-        写入 {{ historyJob.written || 0 }} ｜ 跳过 {{ historyJob.skipped || 0 }}
+        {{ jobLabel(historyJob.status) }} ｜ {{ jobKindText(historyJob.kind) }} ｜ 会话 {{ historyJob.ok_contacts || 0 }}/{{ historyJob.total_contacts || 0 }} ｜
+        {{ historyJob.kind === "media_backfill" ? "补到" : "写入" }} {{ historyJob.written || 0 }} ｜ 跳过 {{ historyJob.skipped || 0 }}
       </p>
       <el-alert
         v-if="historyJob?.error_message"
@@ -271,6 +282,7 @@ const autoEnabled = ref(false);
 const autoMinutes = ref(15);
 const watchEnabled = ref(false);
 const loading = ref(false);
+const backfillLoading = ref(false);
 const resetting = ref(false);
 const saving = ref(false);
 const job = ref(null);
@@ -293,6 +305,10 @@ const percent = computed(() => {
 });
 
 const statusLabel = computed(() => jobLabel(job.value?.status));
+
+const jobKindLabel = computed(() => jobKindText(job.value?.kind));
+
+const jobMetricLabel = computed(() => (job.value?.kind === "media_backfill" ? "补到" : "写入"));
 
 const lastSyncText = computed(() => {
   const last = status.value.last_sync;
@@ -325,6 +341,11 @@ function splitNames(text) {
     if (name && !names.includes(name)) names.push(name);
   }
   return names;
+}
+
+function jobKindText(value) {
+  if (value === "media_backfill") return "补媒体";
+  return "同步";
 }
 
 function jobLabel(value) {
@@ -458,6 +479,24 @@ function onIncludeEnter(e) {
 
 function removeInclude(name) {
   setIncludeItems(includeItems.value.filter((item) => item !== name));
+}
+
+async function startMediaBackfill() {
+  backfillLoading.value = true;
+  try {
+    const created = await api.startMediaBackfill({
+      include_names: includeNames.value,
+      exclude_names: excludeNames.value,
+    });
+    job.value = created;
+    sessionStorage.setItem(JOB_KEY, created.id);
+    poll();
+    loadHistory();
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    backfillLoading.value = false;
+  }
 }
 
 async function start() {
@@ -675,6 +714,7 @@ onUnmounted(() => {
 }
 .form { max-width: 420px; }
 .inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sync-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .limit-pair { display: flex; flex-direction: column; gap: 8px; }
 .hint { color: var(--muted); font-size: 13px; margin: 0; line-height: 1.6; }
 .field-hint { margin-top: 6px; }

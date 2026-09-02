@@ -36,10 +36,20 @@
         </div>
       </template>
       <el-table :data="rows" height="100%" empty-text="当前范围没有好友会话" @row-click="openRow">
-        <el-table-column label="好友" min-width="140">
+        <el-table-column label="好友" min-width="168">
           <template #default="{ row }">
-            <div>{{ row.contact }}</div>
-            <div v-if="row.contact_sub" class="sub">{{ row.contact_sub }}</div>
+            <div class="friend-cell">
+              <ContactAvatar
+                :contact-id="row.contact_id"
+                :name="row.contact"
+                :has-avatar="row.has_avatar"
+                :size="32"
+              />
+              <div class="friend-text">
+                <div>{{ row.contact }}</div>
+                <div v-if="row.contact_sub" class="sub">{{ row.contact_sub }}</div>
+              </div>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -87,6 +97,7 @@ import { computed, inject, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api";
 import { formatTime } from "../formatTime";
+import ContactAvatar from "../components/ContactAvatar.vue";
 
 const filter = inject("filter");
 const router = useRouter();
@@ -190,6 +201,8 @@ watch(filter, load, { deep: true });
 }
 .warn-head { cursor: help; border-bottom: 1px dashed var(--muted); }
 .sub { color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.35; word-break: break-word; }
+.friend-cell { display: flex; align-items: center; gap: 10px; }
+.friend-text { min-width: 0; }
 .intent { font-weight: 600; }
 .snip { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-word; }
 @media (max-width: 900px) {

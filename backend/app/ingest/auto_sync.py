@@ -16,6 +16,7 @@ from app.db import SessionLocal
 from app.engine.metrics import run_rule_scan
 from app.ingest.media.wx_paths import db_storage_dir
 from app.ingest.wechat_cli.sync_job import run_sync_job
+from app.ingest.media.backfill import run_media_backfill_job
 from app.logutil import append_sync_log
 from app.models import SyncJob
 from app.settings_persist import clamp_limit_per_contact
@@ -121,6 +122,23 @@ def sync_busy(db: Session) -> bool:
     )
 
 
+def _run_media_backfill_thread(job_id: str, include_names: str, exclude_names: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(SyncJob, job_id)
+        if job:
+            run_media_backfill_job(
+                db,
+                job,
+                include_names=include_names,
+                exclude_names=exclude_names,
+            )
+            if job.status == "succeeded":
+                run_rule_scan(db)
+    finally:
+        db.close()
+
+
 def _run_sync_thread(
     job_id: str,
     include_groups: bool,
@@ -184,6 +202,7 @@ def enqueue_sync(
         id=str(uuid4()),
         status="queued",
         account_id=account.id,
+        job_kind="sync",
         start_date=(datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
         limit_per_contact=limit_per_contact,
     )
@@ -201,6 +220,35 @@ def enqueue_sync(
             settings.sync_limit_people,
             limit_per_group,
         ),
+        daemon=True,
+    ).start()
+    return job
+
+
+def enqueue_media_backfill(
+    db: Session,
+    *,
+    include_names: str = "",
+    exclude_names: str = "",
+    reason: str = "补拉媒体开始",
+) -> Optional[SyncJob]:
+    if sync_busy(db):
+        return None
+    account = require_sync_account(db)
+    job = SyncJob(
+        id=str(uuid4()),
+        status="queued",
+        account_id=account.id,
+        job_kind="media_backfill",
+        start_date="",
+        limit_per_contact=0,
+    )
+    db.add(job)
+    db.commit()
+    append_sync_log(job.id, reason)
+    threading.Thread(
+        target=_run_media_backfill_thread,
+        args=(job.id, include_names, exclude_names),
         daemon=True,
     ).start()
     return job
